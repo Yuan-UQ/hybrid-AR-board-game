@@ -115,10 +115,15 @@ def _cannon_attack_centers(piece: Piece, state: GameState) -> list[Pos]:
     Cannon attack: look exactly CANNON_ATTACK_DIST (3) nodes in each of the 4
     orthogonal directions.  A direction is a valid attack option if:
       - the node exactly 3 steps away is within the board, AND
-      - that node is occupied by a live enemy piece.
+      - at least one of the 5 cross-AOE nodes (center + 4 orthogonal neighbours)
+        is occupied by a live enemy piece.
 
-    The nodes between the Cannon and the center do NOT need to be empty;
-    Cannon attacks ignore path blocking (§9.4: "not blocked by pieces").
+    The center node itself does NOT need to contain a piece.  The Cannon fires
+    at the cross pattern centred 3 steps away; any enemy caught in the cross
+    takes damage regardless of whether the center is occupied.
+
+    Example: Cannon at (3,0), center (3,3) is empty but (3,2) and (3,4) have
+    enemy pieces → the Cannon may still choose this direction and will hit both.
     """
     x, y = piece.pos
     centers: list[Pos] = []
@@ -127,11 +132,8 @@ def _cannon_attack_centers(piece: Piece, state: GameState) -> list[Pos]:
         cy = y + dy * CANNON_ATTACK_DIST
         if not is_within_board(cx, cy):
             continue
-        pid = state.board.get_piece_id_at(cx, cy)
-        if pid is None:
-            continue
-        occupant = state.pieces[pid]
-        if occupant.faction is not piece.faction and occupant.is_alive():
+        # Valid if at least one enemy is inside the cross AOE
+        if get_cannon_aoe((cx, cy), state, piece.faction):
             centers.append((cx, cy))
     return centers
 

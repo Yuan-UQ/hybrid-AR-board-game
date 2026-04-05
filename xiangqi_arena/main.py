@@ -20,6 +20,12 @@ Controls
 from __future__ import annotations
 
 import sys
+import os
+
+# Allow `python xiangqi_arena/main.py` to work from the project root.
+# When run as a script the package root is not on sys.path; add it here.
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pygame
 
