@@ -1,170 +1,77 @@
-"""
-Shared spatial utilities for Xiangqi Arena.
-
-All functions are pure (no side effects, no state mutation).
-They operate only on coordinates and constants, so they can be imported
-freely by any layer without creating circular dependencies.
-"""
-
-from xiangqi_arena.core.constants import (
-    X_MIN, X_MAX, Y_MIN, Y_MAX,
-    PALACE_BOUNDS,
-    RED_CROSSED_RIVER_Y_MIN,
-    BLACK_CROSSED_RIVER_Y_MAX,
+from core.constants import (
+    BLACK_PALACE_X,
+    BLACK_PALACE_Y,
+    BOARD_HEIGHT,
+    BOARD_WIDTH,
+    RED_PALACE_X,
+    RED_PALACE_Y,
+    RIVER_BOUNDARY,
+    SIDE_FORWARD_STEP,
 )
-from collections.abc import Callable
+from core.enums import Side
 
-from xiangqi_arena.core.enums import Faction
-
-# Type alias for a board coordinate
-Pos = tuple[int, int]
+Position = tuple[int, int]
 
 
-# ---------------------------------------------------------------------------
-# Boundary checks
-# ---------------------------------------------------------------------------
-
-def is_within_board(x: int, y: int) -> bool:
-    """Return True if (x, y) is a legal board node (0..8, 0..9)."""
-    return X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX
+def is_in_bounds(position: Position) -> bool:
+    x, y = position
+    return 0 <= x < BOARD_WIDTH and 0 <= y < BOARD_HEIGHT
 
 
-# ---------------------------------------------------------------------------
-# Palace checks
-# Rulebook V3 §4.4: General/Marshal can only move within its own palace.
-# ---------------------------------------------------------------------------
-
-def is_in_palace(x: int, y: int, faction: Faction) -> bool:
-    """Return True if (x, y) is inside *faction*'s palace."""
-    bounds = PALACE_BOUNDS[faction]
-    x_min, x_max = bounds["x"]
-    y_min, y_max = bounds["y"]
-    return x_min <= x <= x_max and y_min <= y <= y_max
+def is_in_palace(position: Position, side: Side) -> bool:
+    x, y = position
+    if side is Side.RED:
+        return x in RED_PALACE_X and y in RED_PALACE_Y
+    return x in BLACK_PALACE_X and y in BLACK_PALACE_Y
 
 
-# ---------------------------------------------------------------------------
-# River checks
-# Rulebook V3 §4.3
-# ---------------------------------------------------------------------------
-
-def has_crossed_river(x: int, y: int, faction: Faction) -> bool:
-    """
-    Return True if the piece at (x, y) is on the opponent's side of the river.
-
-    Red crosses when y >= 5; Black crosses when y <= 4.
-    """
-    if faction is Faction.RED:
-        return y >= RED_CROSSED_RIVER_Y_MIN
-    else:
-        return y <= BLACK_CROSSED_RIVER_Y_MAX
+def has_crossed_river(position: Position, side: Side) -> bool:
+    _, y = position
+    if side is Side.RED:
+        return y >= RIVER_BOUNDARY + 1
+    return y <= RIVER_BOUNDARY
 
 
-def is_on_own_side(x: int, y: int, faction: Faction) -> bool:
-    """Return True if (x, y) is on *faction*'s own half of the board."""
-    return not has_crossed_river(x, y, faction)
+def forward_step(side: Side) -> int:
+    return SIDE_FORWARD_STEP[side]
 
 
-# ---------------------------------------------------------------------------
-# Adjacency helpers
-# Rulebook V3 §4.5
-# ---------------------------------------------------------------------------
-
-def orthogonal_neighbors(x: int, y: int) -> list[Pos]:
-    """
-    Return the up-to-4 orthogonally adjacent nodes of (x, y) that are within
-    the board.  Order: up, down, left, right.
-    """
-    candidates = [(x, y + 1), (x, y - 1), (x - 1, y), (x + 1, y)]
-    return [(cx, cy) for cx, cy in candidates if is_within_board(cx, cy)]
+def orthogonal_neighbors(position: Position) -> list[Position]:
+    x, y = position
+    candidates = ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+    return [candidate for candidate in candidates if is_in_bounds(candidate)]
 
 
-def neighborhood_3x3(x: int, y: int) -> list[Pos]:
-    """
-    Return the up-to-8 nodes in the 3×3 area centred on (x, y), excluding
-    the centre itself, restricted to nodes within the board.
+def diagonal_neighbors(position: Position) -> list[Position]:
+    x, y = position
+    candidates = ((x + 1, y + 1), (x + 1, y - 1), (x - 1, y + 1), (x - 1, y - 1))
+    return [candidate for candidate in candidates if is_in_bounds(candidate)]
 
-    Used for Pawn nearby-ally bonus (Rulebook V3 §9.5).
-    """
-    neighbors = []
+
+def local_neighbors(position: Position) -> list[Position]:
+    x, y = position
+    result: list[Position] = []
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
             if dx == 0 and dy == 0:
                 continue
-            nx, ny = x + dx, y + dy
-            if is_within_board(nx, ny):
-                neighbors.append((nx, ny))
-    return neighbors
-
-
-def is_orthogonally_adjacent(pos_a: Pos, pos_b: Pos) -> bool:
-    """Return True if pos_a and pos_b are exactly 1 step apart orthogonally."""
-    ax, ay = pos_a
-    bx, by = pos_b
-    return (abs(ax - bx) + abs(ay - by)) == 1
-
-
-# ---------------------------------------------------------------------------
-# Direction helpers (used by Chariot / Cannon path building)
-# ---------------------------------------------------------------------------
-
-# The four orthogonal unit vectors: up, down, left, right
-ORTHOGONAL_DIRECTIONS: list[Pos] = [(0, 1), (0, -1), (-1, 0), (1, 0)]
-
-
-def nodes_in_direction(x: int, y: int, dx: int, dy: int) -> list[Pos]:
-    """
-    Return all board nodes reachable from (x, y) by repeatedly applying
-    the unit vector (dx, dy), stopping at the board boundary (exclusive of
-    the starting node).
-    """
-    result: list[Pos] = []
-    cx, cy = x + dx, y + dy
-    while is_within_board(cx, cy):
-        result.append((cx, cy))
-        cx += dx
-        cy += dy
+            candidate = (x + dx, y + dy)
+            if is_in_bounds(candidate):
+                result.append(candidate)
     return result
 
 
-# ---------------------------------------------------------------------------
-# Horse move helpers
-# Rulebook V3 §9.3: standard Chinese chess horse (L-shape with blocking).
-# The blocking node is the orthogonal step taken before the diagonal step.
-# ---------------------------------------------------------------------------
-
-# Each entry: (blocking_dx, blocking_dy, final_dx, final_dy)
-_HORSE_MOVES: list[tuple[int, int, int, int]] = [
-    ( 0,  1,  1,  2), ( 0,  1, -1,  2),   # step up, then diagonal
-    ( 0, -1,  1, -2), ( 0, -1, -1, -2),   # step down, then diagonal
-    ( 1,  0,  2,  1), ( 1,  0,  2, -1),   # step right, then diagonal
-    (-1,  0, -2,  1), (-1,  0, -2, -1),   # step left, then diagonal
-]
-
-
-def horse_reachable(x: int, y: int, is_occupied: Callable[[int, int], bool]) -> list[Pos]:
-    """
-    Return all positions reachable by a Horse at (x, y).
-
-    *is_occupied* should be a callable(x, y) -> bool that returns True when a
-    node is occupied by any live piece (blocking the leg).
-    """
-    result: list[Pos] = []
-    for bx, by, fx, fy in _HORSE_MOVES:
-        block_x, block_y = x + bx, y + by
-        if not is_within_board(block_x, block_y):
-            continue
-        if is_occupied(block_x, block_y):
-            continue               # leg is blocked
-        dest_x, dest_y = x + fx, y + fy
-        if is_within_board(dest_x, dest_y):
-            result.append((dest_x, dest_y))
+def orthogonal_line(position: Position, direction: Position, steps: int) -> list[Position]:
+    x, y = position
+    dx, dy = direction
+    result: list[Position] = []
+    for step in range(1, steps + 1):
+        candidate = (x + dx * step, y + dy * step)
+        if not is_in_bounds(candidate):
+            break
+        result.append(candidate)
     return result
 
 
-# ---------------------------------------------------------------------------
-# Round parity helper
-# ---------------------------------------------------------------------------
-
-def is_event_point_round(round_number: int) -> bool:
-    """Return True when an event point should spawn (odd-numbered rounds)."""
-    return round_number % 2 == 1
+def add_position(position: Position, delta: Position) -> Position:
+    return position[0] + delta[0], position[1] + delta[1]

@@ -1,392 +1,303 @@
-"""
-Xiangqi Arena — main game loop.
+from random import Random
 
-Player-facing interaction is reduced to exactly TWO phases per turn:
+from core.config import GameConfig
+from core.constants import DEFAULT_OPENING_LAYOUT
+from core.enums import PhaseType, PieceType, Side, VictoryStatus
+from models.board import Board
+from models.piece import Piece
+from models.player import Player
+from rules.attack_rules import cannon_attack_profiles, legal_attacks_for_piece
+from rules.event_rules import should_spawn_event, spawn_event
+from rules.movement_rules import is_legal_move
+from rules.victory_rules import evaluate_victory
+from state.game_state import GameState
 
-  MOVEMENT  : click a piece, then click a green node  (Enter = skip)
-  ATTACK    : click a red target                       (Enter = skip)
-
-The other three phases (START, RECOGNITION, RESOLVE) are processed
-automatically on the same frame they are entered — players never see a
-"Press Enter to continue" prompt for them.
-
-Controls
---------
-  Mouse click on board  : select piece / choose destination or attack target
-  Enter / Space         : skip the current action (move or attack)
-  Escape                : cancel current selection (or quit on game-over)
-"""
-
-from __future__ import annotations
-
-import sys
-import os
-
-# Allow `python xiangqi_arena/main.py` to work from the project root.
-# When run as a script the package root is not on sys.path; add it here.
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import pygame
-
-# ---------------------------------------------------------------------------
-# Game-logic imports
-# ---------------------------------------------------------------------------
-from xiangqi_arena.core.enums import Faction, Phase, PieceType, VictoryState
-from xiangqi_arena.flow.phase import advance_phase
-from xiangqi_arena.flow.round import should_spawn_event_point
-from xiangqi_arena.flow.turn import can_select_piece, end_turn, start_turn
-from xiangqi_arena.modification.attack import (
-    apply_attack, apply_cannon_attack, apply_skip_attack,
-)
-from xiangqi_arena.modification.event import apply_event_trigger, spawn_event_point
-from xiangqi_arena.modification.move import apply_move, apply_skip_move
-from xiangqi_arena.rules.event_rules import get_all_triggers
-from xiangqi_arena.rules.piece_rules import legal_attack_targets, legal_moves
-from xiangqi_arena.state.game_state import GameState, build_default_state
-
-# ---------------------------------------------------------------------------
-# UI / input imports
-# ---------------------------------------------------------------------------
-from xiangqi_arena.input_control.keyboard_handler import KeyAction, classify_key
-from xiangqi_arena.input_control.selection_handler import (
-    SelectionState, pixel_to_node,
-)
-from xiangqi_arena.ui.board_renderer import draw_board
-from xiangqi_arena.ui.death_marker_renderer import draw_dead_pieces
-from xiangqi_arena.ui.display_config import (
-    FPS, WINDOW_H, WINDOW_TITLE, WINDOW_W,
-)
-from xiangqi_arena.ui.event_renderer import draw_event_points
-from xiangqi_arena.ui.highlight_renderer import draw_highlights
-from xiangqi_arena.ui.others import BUTTON_RECT, draw_panel, draw_victory_overlay
-from xiangqi_arena.ui.piece_renderer import draw_pieces
+from modification.attack import queue_attack, resolve_pending_attack
+from modification.event import resolve_event_trigger
+from modification.move import execute_move
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-LOG_MAX = 15   # keep at most this many log entries
-
-
-def _piece_at(state: GameState, pos: tuple) -> str | None:
-    return state.board._occupancy.get(pos)
+def end_turn(state: GameState) -> None:
+    previous_side = state.current_side
+    state.current_side = Side.BLACK if previous_side is Side.RED else Side.RED
+    if previous_side is Side.BLACK:
+        state.round_number += 1
+    state.current_phase = PhaseType.START
+    state.action.reset()
 
 
-def _is_game_over(state: GameState) -> bool:
-    return state.victory_state != VictoryState.ONGOING
+def build_initial_state(config: GameConfig | None = None) -> GameState:
+    config = config or GameConfig()
+    rng = Random(config.random_seed)
+    board = Board()
+    players = {
+        Side.RED: Player(side=Side.RED),
+        Side.BLACK: Player(side=Side.BLACK),
+    }
+    pieces: dict[str, Piece] = {}
+    for side, layout in DEFAULT_OPENING_LAYOUT.items():
+        bundle = [
+            Piece.create(f"{side.name.lower()}_general", PieceType.GENERAL, side, layout["general"]),
+            Piece.create(f"{side.name.lower()}_chariot", PieceType.CHARIOT, side, layout["chariot"]),
+            Piece.create(f"{side.name.lower()}_horse", PieceType.HORSE, side, layout["horse"]),
+            Piece.create(f"{side.name.lower()}_cannon", PieceType.CANNON, side, layout["cannon"]),
+        ]
+        for index, position in enumerate(layout["pawns"], start=1):
+            bundle.append(Piece.create(f"{side.name.lower()}_pawn_{index}", PieceType.PAWN, side, position))
+        players[side].piece_ids = [piece.piece_id for piece in bundle]
+        for piece in bundle:
+            pieces[piece.piece_id] = piece
+            board.place_piece(piece.piece_id, piece.position)
+    return GameState(board=board, players=players, pieces=pieces, config=config, rng=rng)
 
 
-# ---------------------------------------------------------------------------
-# Auto-phase drain
-# Called every frame until we land on an interactive phase (MOVEMENT/ATTACK).
-# ---------------------------------------------------------------------------
+def restart_game(state: GameState) -> GameState:
+    return build_initial_state(state.config)
 
-def _drain_auto_phases(
-    state: GameState,
-    sel: SelectionState,
-    log: list[str],
-    game_over_ref: list[bool],
-) -> None:
-    """
-    Process all non-interactive phases in a tight loop so that the player
-    only ever "sees" MOVEMENT and ATTACK.
 
-    All informational messages are pushed to *log* (newest-first).
-    """
-    for _ in range(10):
-        phase = state.current_phase
+def select_piece(state: GameState, piece_id: str) -> str:
+    piece = state.pieces.get(piece_id)
+    if piece is None:
+        return "Unknown piece."
+    if piece.is_dead:
+        return "That piece is dead."
+    if piece.side is not state.current_side:
+        return "You can only operate your own pieces."
+    if state.action.piece_id is not None and state.action.piece_id != piece_id and state.action.has_moved:
+        return "Only one piece can be operated each turn."
+    state.action.piece_id = piece_id
+    return f"Selected {piece_id}."
 
-        if phase in (Phase.MOVEMENT, Phase.ATTACK):
-            break
 
-        if phase == Phase.START:
-            if should_spawn_event_point(state):
-                spawn_event_point(state)
-                descs = [
-                    f"{ep.event_type.value}@{ep.pos}"
-                    for ep in state.event_points
-                ]
-                _push(log, "✦ Spawned: " + "  /  ".join(descs))
-            advance_phase(state)   # → MOVEMENT
+def clear_selection(state: GameState) -> str:
+    if state.action.has_moved:
+        return "Selection locked after action."
+    state.action.piece_id = None
+    state.action.selected_target = None
+    state.action.cannon_direction = None
+    return "Selection cleared."
 
-        elif phase == Phase.RECOGNITION:
-            triggers = get_all_triggers(state)
-            for pid, ep in triggers:
-                apply_event_trigger(pid, ep, state)
-                _push(log, f"✦ {pid} → {ep.event_type.value}!")
-            advance_phase(state)   # → ATTACK
 
-            if sel.has_selection:
-                pid = sel.selected_pid
-                piece = state.pieces.get(pid)
-                if piece and not piece.is_dead:
-                    sel.valid_attacks = legal_attack_targets(piece, state)
+def try_move_piece(state: GameState, piece_id: str, destination: tuple[int, int]) -> str:
+    if state.victory_status is not VictoryStatus.ONGOING:
+        return "Game is over. Press R to restart."
+    if state.current_phase is not PhaseType.MOVE:
+        return "Move is only allowed in MOVE phase."
+    if state.action.has_moved or state.action.skipped_move:
+        return "This turn has already moved."
+    piece = state.pieces.get(piece_id)
+    if piece is None or piece.is_dead or piece.side is not state.current_side:
+        return "Invalid piece selection."
+    if state.action.piece_id is not None and state.action.piece_id != piece_id:
+        return "Only one piece can be operated each turn."
+    if not is_legal_move(state, piece, destination):
+        return "Illegal move."
+    execute_move(state, piece_id, destination)
+    return f"Moved {piece_id} to {destination}"
 
-        elif phase == Phase.RESOLVE:
-            if _is_game_over(state):
-                game_over_ref[0] = True
-                break
-            end_turn(state)
-            sel.deselect()
 
+def finish_move_with_auto_attack(state: GameState, piece_id: str, destination: tuple[int, int]) -> str:
+    move_message = try_move_piece(state, piece_id, destination)
+    if not move_message.startswith("Moved"):
+        return move_message
+
+    messages = [move_message]
+    event_message = resolve_event_trigger(state, piece_id)
+    if event_message:
+        messages.append(event_message)
+    return finish_selected_piece_action(state, piece_id, messages)
+
+
+def finish_skip_move_with_auto_attack(state: GameState) -> str:
+    if state.victory_status is not VictoryStatus.ONGOING:
+        return "Game is over. Press R to restart."
+    if state.current_phase is not PhaseType.MOVE:
+        return "Skip move is only allowed in MOVE phase."
+    piece_id = state.action.piece_id
+    if piece_id is None:
+        return "Select a piece first, then press S to skip movement and attack."
+    piece = state.pieces.get(piece_id)
+    if piece is None or piece.is_dead or piece.side is not state.current_side:
+        return "Invalid piece selection."
+    state.action.skipped_move = True
+    return finish_selected_piece_action(state, piece_id, [f"{piece_id} skipped movement."])
+
+
+def finish_selected_piece_action(state: GameState, piece_id: str, messages: list[str]) -> str:
+    piece = state.pieces[piece_id]
+    if not piece.is_dead:
+        attack_message = queue_first_available_attack(state, piece_id)
+        if attack_message:
+            messages.append(attack_message)
         else:
-            break
+            messages.append("No target in range.")
+
+    state.victory_status = evaluate_victory(state)
+    if state.victory_status is VictoryStatus.ONGOING:
+        end_turn(state)
+        messages.append(start_current_turn(state))
+    else:
+        messages.append(f"Game over: {state.victory_status.name}.")
+    return "\n".join(messages)
 
 
-def _push(log: list[str], msg: str) -> None:
-    """Prepend *msg* to *log* (newest first), trimming to LOG_MAX."""
-    if msg.strip():
-        log.insert(0, msg)
-        while len(log) > LOG_MAX:
-            log.pop()
-
-
-# ---------------------------------------------------------------------------
-# Interactive phase: MOVEMENT
-# ---------------------------------------------------------------------------
-
-def _handle_movement(
-    state: GameState,
-    sel: SelectionState,
-    confirm: bool,
-    click_node: tuple | None,
-) -> str:
-    active = state.active_faction
-
-    if confirm:
-        apply_skip_move(state)
-        advance_phase(state)
-        sel.deselect()
-        return "Move skipped."
-
-    if click_node is None:
-        return ""
-
-    if sel.has_selection and click_node in sel.valid_moves:
-        pid   = sel.selected_pid
-        piece = state.pieces[pid]
-        apply_move(pid, click_node, state)
-        sel.select(
-            pid, click_node,
-            moves=[],
-            attacks=legal_attack_targets(piece, state),
+def queue_first_available_attack(state: GameState, piece_id: str) -> str | None:
+    piece = state.pieces.get(piece_id)
+    if piece is None or piece.is_dead:
+        return None
+    if piece.piece_type is PieceType.CANNON:
+        profiles = sorted(
+            cannon_attack_profiles(state, piece),
+            key=lambda profile: (len(profile.target_ids), profile.center[1], profile.center[0]),
+            reverse=True,
         )
-        advance_phase(state)
-        return f"Moved {pid} → {click_node}"
+        if not profiles:
+            return None
+        queue_attack(state, piece_id, direction=profiles[0].direction)
+        return resolve_pending_attack(state)
 
-    pid = _piece_at(state, click_node)
-    if pid is None:
-        sel.deselect()
-        return ""
-
-    piece = state.pieces.get(pid)
-    if piece is None or piece.faction != active or piece.is_dead:
-        sel.deselect()
-        return ""
-
-    if not can_select_piece(state, pid):
-        sel.deselect()
-        return f"{pid} cannot move this turn."
-
-    moves = legal_moves(piece, state)
-    sel.select(pid, click_node, moves=moves, attacks=[])
-    return f"Selected {pid}  ({len(moves)} moves)"
+    targets = sorted(legal_attacks_for_piece(state, piece), key=lambda position: (position[1], position[0]))
+    if not targets:
+        return None
+    queue_attack(state, piece_id, target=targets[0])
+    return resolve_pending_attack(state)
 
 
-# ---------------------------------------------------------------------------
-# Interactive phase: ATTACK
-# ---------------------------------------------------------------------------
+def request_draw(state: GameState) -> str:
+    if state.victory_status is not VictoryStatus.ONGOING:
+        return "Game is already over."
+    state.players[state.current_side].agreed_to_draw = True
+    if all(player.agreed_to_draw for player in state.players.values()):
+        state.victory_status = VictoryStatus.DRAW
+        return "Both players agreed to a draw."
+    return f"{state.current_side.name} requested a draw. Opponent must also request draw."
 
-def _handle_attack(
-    state: GameState,
-    sel: SelectionState,
-    confirm: bool,
-    click_node: tuple | None,
-) -> str:
-    active = state.active_faction
 
-    if confirm:
-        apply_skip_attack(state)
-        advance_phase(state)
-        sel.deselect()
-        return "Attack skipped."
+def surrender(state: GameState) -> str:
+    if state.victory_status is not VictoryStatus.ONGOING:
+        return "Game is already over."
+    state.players[state.current_side].has_surrendered = True
+    state.victory_status = VictoryStatus.BLACK_WIN if state.current_side is Side.RED else VictoryStatus.RED_WIN
+    return f"{state.current_side.name} surrendered."
 
-    if click_node is None:
-        return ""
 
-    if sel.has_selection:
-        pid   = sel.selected_pid
-        piece = state.pieces.get(pid)
+def start_current_turn(state: GameState) -> str:
+    if state.victory_status is not VictoryStatus.ONGOING:
+        return f"Game is over: {state.victory_status.name}. Press R to restart."
+    if state.current_phase is PhaseType.MOVE:
+        return f"{state.current_side.name} is already moving."
+    messages: list[str] = []
+    if should_spawn_event(state):
+        spawned = spawn_event(state)
+        if spawned is not None:
+            messages.append(f"Event spawned: {spawned.event_type.name} at {spawned.position}")
+    state.current_phase = PhaseType.MOVE
+    messages.append(f"{state.current_side.name} to move.")
+    return "\n".join(messages)
 
-        if piece and not piece.is_dead and click_node in sel.valid_attacks:
-            if piece.piece_type == PieceType.CANNON:
-                apply_cannon_attack(pid, click_node, state)
+
+def render_board(state: GameState) -> str:
+    rows: list[str] = []
+    labels = {
+        PieceType.GENERAL: "G",
+        PieceType.CHARIOT: "R",
+        PieceType.HORSE: "H",
+        PieceType.CANNON: "C",
+        PieceType.PAWN: "P",
+    }
+    for y in reversed(range(state.board.height)):
+        cells: list[str] = []
+        for x in range(state.board.width):
+            marker = "."
+            piece_id = state.board.get_piece_at((x, y))
+            if piece_id is not None:
+                piece = state.pieces[piece_id]
+                marker = labels[piece.piece_type]
+                if piece.side is Side.BLACK:
+                    marker = marker.lower()
+            for event_point in state.event_points:
+                if event_point.active and event_point.position == (x, y):
+                    marker = event_point.event_type.name[0]
+                    break
+            cells.append(marker)
+        rows.append(f"{y:>2} " + " ".join(cells))
+    rows.append("   " + " ".join(str(x) for x in range(state.board.width)))
+    return "\n".join(rows)
+
+
+def render_status(state: GameState) -> str:
+    selected = state.selected_piece()
+    lines = [
+        f"Round {state.round_number} | Side {state.current_side.name} | Phase {state.current_phase.name} | Result {state.victory_status.name}",
+        f"Selected: {selected.piece_id if selected else 'none'}",
+        render_board(state),
+        "Pieces:",
+    ]
+    for piece in sorted(state.pieces.values(), key=lambda item: (item.side.name, item.piece_id)):
+        status = "dead" if piece.is_dead else f"hp={piece.hp}/{piece.max_hp}"
+        lines.append(f"  {piece.piece_id:<14} {piece.side.name:<5} {piece.piece_type.name:<7} pos={piece.position} atk={piece.atk} {status}")
+    if state.event_points:
+        active = [event for event in state.event_points if event.active]
+        lines.append("Events: " + (", ".join(f"{event.event_type.name}@{event.position}" for event in active) if active else "none"))
+    if state.history:
+        lines.append("Recent: " + " | ".join(state.history[-3:]))
+    return "\n".join(lines)
+
+
+def run_cli() -> None:
+    state = build_initial_state()
+    print("Xiangqi Arena MVP")
+    print("Commands: enter, status, select <id>, clear, move <id> x y, skip, draw, surrender, restart, quit")
+    print(render_status(state))
+    while True:
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            break
+        if not raw:
+            continue
+        parts = raw.split()
+        command = parts[0].lower()
+        try:
+            if command in {"quit", "exit"}:
+                break
+            if command == "enter":
+                message = start_current_turn(state)
+            elif command == "status":
+                message = render_status(state)
+            elif command == "select" and len(parts) == 2:
+                message = select_piece(state, parts[1])
+            elif command == "clear":
+                message = clear_selection(state)
+            elif command == "move" and len(parts) == 4:
+                message = finish_move_with_auto_attack(state, parts[1], (int(parts[2]), int(parts[3])))
+            elif command == "skip":
+                message = finish_skip_move_with_auto_attack(state)
+            elif command == "draw":
+                message = request_draw(state)
+            elif command == "surrender":
+                message = surrender(state)
+            elif command == "restart":
+                state = restart_game(state)
+                message = "Game restarted."
             else:
-                apply_attack(pid, click_node, state)
-            advance_phase(state)
-            sel.deselect()
-            return f"{pid} attacked {click_node}"
+                message = "Unknown command or wrong arguments."
+        except ValueError:
+            message = "Coordinates must be integers."
+        print(message)
 
-        new_pid = _piece_at(state, click_node)
-        if new_pid:
-            new_piece = state.pieces.get(new_pid)
-            if new_piece and new_piece.faction == active and not new_piece.is_dead:
-                attacks = legal_attack_targets(new_piece, state)
-                sel.select(new_pid, click_node, moves=[], attacks=attacks)
-                return f"Selected {new_pid}  ({len(attacks)} targets)"
-
-        sel.deselect()
-        return ""
-
-    pid = _piece_at(state, click_node)
-    if pid is None:
-        return ""
-    piece = state.pieces.get(pid)
-    if piece is None or piece.faction != active or piece.is_dead:
-        return ""
-
-    attacks = legal_attack_targets(piece, state)
-    sel.select(pid, click_node, moves=[], attacks=attacks)
-    return f"Selected {pid}  ({len(attacks)} targets)"
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
-    pygame.init()
-    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption(WINDOW_TITLE)
-    clock  = pygame.time.Clock()
+    try:
+        from ui.pygame_app import PygameApp
+    except ModuleNotFoundError as exc:
+        if exc.name != "pygame":
+            raise
+        run_cli()
+        return
 
-    state: GameState = build_default_state()
-    start_turn(state)
-
-    sel           = SelectionState()
-    log: list[str] = []
-    game_over_ref  = [False]
-
-    # Drain the first START phase so we land on MOVEMENT immediately
-    _drain_auto_phases(state, sel, log, game_over_ref)
-    game_over = game_over_ref[0]
-
-    # Announce whose turn it is at startup
-    faction = "RED" if state.active_faction == Faction.RED else "BLACK"
-    _push(log, f"Round {state.round_number} — {faction}'s turn")
-
-    running = True
-    while running:
-        # ----------------------------------------------------------------
-        # Event polling
-        # ----------------------------------------------------------------
-        confirm              = False
-        click_node: tuple | None = None
-        mouse_pos            = pygame.mouse.get_pos()
-        btn_hover            = BUTTON_RECT.collidepoint(mouse_pos)
-
-        for ev in pygame.event.get():
-            if ev.type == pygame.QUIT:
-                running = False
-
-            elif ev.type == pygame.KEYDOWN:
-                ka = classify_key(ev)
-                if ka == KeyAction.CONFIRM:
-                    confirm = True
-                elif ka == KeyAction.CANCEL:
-                    if game_over:
-                        running = False
-                    else:
-                        sel.deselect()
-
-            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                mx, my = ev.pos
-                if BUTTON_RECT.collidepoint(mx, my):
-                    confirm = True
-                else:
-                    click_node = pixel_to_node(mx, my)
-
-        # ----------------------------------------------------------------
-        # Interactive phase handling
-        # ----------------------------------------------------------------
-        if not game_over:
-            phase = state.current_phase
-
-            if phase == Phase.MOVEMENT:
-                msg = _handle_movement(state, sel, confirm, click_node)
-                if msg:
-                    _push(log, msg)
-
-            elif phase == Phase.ATTACK:
-                if sel.has_selection and not sel.valid_attacks:
-                    pid   = sel.selected_pid
-                    piece = state.pieces.get(pid)
-                    if piece and not piece.is_dead:
-                        sel.valid_attacks = legal_attack_targets(piece, state)
-
-                msg = _handle_attack(state, sel, confirm, click_node)
-                if msg:
-                    _push(log, msg)
-
-            # ── Drain any auto-phases that were triggered ────────────────
-            prev_round   = state.round_number
-            prev_faction = state.active_faction
-
-            game_over_ref[0] = game_over
-            _drain_auto_phases(state, sel, log, game_over_ref)
-            game_over = game_over_ref[0]
-
-            # If the turn changed, log the new player's turn header
-            if (state.round_number != prev_round
-                    or state.active_faction != prev_faction):
-                new_faction = ("RED" if state.active_faction == Faction.RED
-                               else "BLACK")
-                _push(log, f"Round {state.round_number} — {new_faction}'s turn")
-
-            if _is_game_over(state) and not game_over:
-                game_over = True
-
-        # ----------------------------------------------------------------
-        # Render
-        # ----------------------------------------------------------------
-        screen.fill((50, 40, 30))
-        draw_board(screen)
-        draw_dead_pieces(screen, state)
-        draw_event_points(screen, state)
-
-        if state.current_phase in (Phase.MOVEMENT, Phase.ATTACK):
-            draw_highlights(
-                screen,
-                selected_pos  = sel.selected_pos,
-                valid_moves   = sel.valid_moves,
-                valid_attacks = sel.valid_attacks,
-            )
-
-        draw_pieces(screen, state)
-
-        btn_lbl = (
-            "Skip Move  [Enter]"   if state.current_phase == Phase.MOVEMENT else
-            "Skip Attack  [Enter]" if state.current_phase == Phase.ATTACK   else
-            "…"
-        )
-
-        draw_panel(
-            screen, state,
-            log       = log,
-            btn_label = btn_lbl,
-            btn_hover = btn_hover,
-        )
-
-        if game_over:
-            draw_victory_overlay(screen, state)
-
-        pygame.display.flip()
-        clock.tick(FPS)
-
-    pygame.quit()
-    sys.exit(0)
+    app = PygameApp(build_initial_state())
+    app.run()
 
 
 if __name__ == "__main__":

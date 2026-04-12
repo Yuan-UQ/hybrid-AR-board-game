@@ -1,179 +1,71 @@
-"""
-Apply confirmed attack changes to GameState.
+from core.enums import PieceType
+from rules.attack_rules import cannon_attack_profiles
+from rules.damage_rules import compute_damage
+from rules.death_rules import refresh_death_state
+from state.game_state import GameState
 
-This module is the authoritative writer of combat outcomes.  It calls
-rules/damage_rules to compute numbers and then mutates the pieces and board.
+from modification.spatial_rule import general_damage_reduction, pawn_attack_bonus
 
-Responsibilities (Guide v2 §4.7 / Rulebook V3 §11, §12.3 Phase 5):
-- Apply damage to target piece(s).
-- Detect newly dead pieces and mark them (piece.mark_dead()).
-- Remove dead pieces from board occupancy (dead pieces do not occupy nodes).
-- Refresh victory state immediately after any kill (Rulebook V3 §15.1).
-- Mark ActionContext.attack_completed = True.
-- Append history entries.
-
-Two public functions:
-  apply_attack(attacker_id, target_pos, state)
-      Single-target attack — used by all pieces except the Cannon.
-
-  apply_cannon_attack(attacker_id, center_pos, state)
-      Cross-shaped AOE attack — used by the Cannon only.
-      All hits in the AOE are calculated first, then all deaths are processed,
-      then victory is checked once.
-"""
-
-from __future__ import annotations
-
-from xiangqi_arena.models.piece import Piece
-from xiangqi_arena.rules.attack_rules import get_cannon_aoe
-from xiangqi_arena.rules.damage_rules import compute_damage
-from xiangqi_arena.rules.death_rules import is_piece_dead
-from xiangqi_arena.rules.victory_rules import check_victory
-from xiangqi_arena.state.game_state import GameState
-
-Pos = tuple[int, int]
+DIR_LABELS = {
+    (0, 1): "up",
+    (0, -1): "down",
+    (-1, 0): "left",
+    (1, 0): "right",
+}
 
 
-# ---------------------------------------------------------------------------
-# Public entry points
-# ---------------------------------------------------------------------------
+def _piece_label(piece_id: str) -> str:
+    return piece_id.replace("_", " ")
 
-def apply_attack(attacker_id: str, target_pos: Pos, state: GameState) -> None:
-    """
-    Apply a single-target attack by *attacker_id* against the piece at
-    *target_pos*.
 
-    Preconditions (caller's responsibility):
-    - target_pos is a legal attack target per rules/piece_rules.
-    - The game is in ATTACK phase and no attack has been made yet this turn.
-    """
-    attacker: Piece = state.pieces[attacker_id]
-    target_id = state.board.get_piece_id_at(*target_pos)
+def queue_attack(state: GameState, piece_id: str, target: tuple[int, int] | None = None, direction: tuple[int, int] | None = None) -> None:
+    state.action.piece_id = piece_id
+    state.action.selected_target = target
+    state.action.cannon_direction = direction
+
+
+def _apply_damage(state: GameState, attacker_id: str, target_id: str) -> int:
+    attacker = state.pieces[attacker_id]
+    target = state.pieces[target_id]
+    bonus = pawn_attack_bonus(state, attacker_id)
+    reduction = general_damage_reduction(state, target_id)
+    damage = compute_damage(attacker, bonus=bonus, reduction=reduction)
+    target.hp -= damage
+    if refresh_death_state(target):
+        state.board.clear_position(target.position)
+    return damage
+
+
+def resolve_pending_attack(state: GameState) -> str:
+    piece_id = state.action.piece_id
+    if piece_id is None or state.action.selected_target is None and state.action.cannon_direction is None:
+        return "No attack resolved."
+    attacker = state.pieces[piece_id]
+    if attacker.is_dead:
+        return "Selected attacker is dead."
+    if attacker.piece_type is PieceType.CANNON:
+        return _resolve_cannon_attack(state, piece_id)
+    target_id = state.board.get_piece_at(state.action.selected_target)
     if target_id is None:
-        raise ValueError(f"No piece at {target_pos} to attack.")
-    target: Piece = state.pieces[target_id]
-
-    damage = compute_damage(attacker, target, state)
-    target.apply_damage(damage)
-
-    _record_attack(attacker, target, damage, state)
-
-    if is_piece_dead(target):
-        _process_death(target, state)
-
-    _refresh_victory(state)
-
-    state.action.attack_completed = True
+        return "Attack target missing."
+    damage = _apply_damage(state, piece_id, target_id)
+    message = f"{_piece_label(piece_id)} hits {_piece_label(target_id)} for {damage}"
+    state.history.append(message)
+    return message
 
 
-def apply_cannon_attack(
-    attacker_id: str,
-    center_pos: Pos,
-    state: GameState,
-) -> None:
-    """
-    Apply the Cannon's cross-shaped AOE attack.
-
-    Steps:
-    1. Compute which AOE nodes contain enemy pieces.
-    2. Compute and apply damage to each.
-    3. Process all resulting deaths (board cleanup).
-    4. Check victory once after all hits.
-    """
-    attacker: Piece = state.pieces[attacker_id]
-    aoe_nodes = get_cannon_aoe(center_pos, state, attacker.faction)
-
-    hit_pieces: list[tuple[Piece, int]] = []   # (piece, damage)
-    for pos in aoe_nodes:
-        pid = state.board.get_piece_id_at(*pos)
-        if pid is None:
+def _resolve_cannon_attack(state: GameState, piece_id: str) -> str:
+    profiles = cannon_attack_profiles(state, state.pieces[piece_id])
+    for profile in profiles:
+        if profile.direction != state.action.cannon_direction:
             continue
-        target: Piece = state.pieces[pid]
-        if not target.is_alive():
-            continue
-        damage = compute_damage(attacker, target, state)
-        target.apply_damage(damage)
-        hit_pieces.append((target, damage))
-        _record_attack(attacker, target, damage, state)
-
-    # Process all deaths after all hits have been applied
-    for target, _ in hit_pieces:
-        if is_piece_dead(target) and not target.is_dead:
-            _process_death(target, state)
-
-    _refresh_victory(state)
-
-    state.action.attack_completed = True
-    state.action.target_pos = center_pos
-
-
-def apply_skip_attack(state: GameState) -> None:
-    """Record that the active player chose not to attack this turn."""
-    state.action.attack_skipped = True
-
-    state.history.append({
-        "type": "skip_attack",
-        "round": state.round_number,
-        "faction": state.active_faction.value,
-    })
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _process_death(piece: Piece, state: GameState) -> None:
-    """
-    Formally kill *piece*:
-    - Call piece.mark_dead() (sets is_dead=True, is_operable=False).
-    - Remove it from board occupancy so the node is treated as empty.
-    - Append a death record to history.
-    """
-    piece.mark_dead()
-    # Dead pieces must not occupy nodes (Rulebook V3 §11.4)
-    try:
-        state.board.remove_piece(*piece.pos)
-    except KeyError:
-        pass   # already removed (e.g. double-processing guard)
-
-    state.history.append({
-        "type": "death",
-        "round": state.round_number,
-        "faction": piece.faction.value,
-        "piece_id": piece.id,
-        "pos": piece.pos,
-    })
-
-
-def _refresh_victory(state: GameState) -> None:
-    """
-    Re-evaluate victory conditions and write the result into state.
-    Called immediately after every damage application (Rulebook V3 §15.1:
-    game ends *immediately* when the General/Marshal reaches HP ≤ 0).
-    """
-    result = check_victory(state)
-    if result is not state.victory_state:
-        state.victory_state = result
-
-        state.history.append({
-            "type": "victory",
-            "round": state.round_number,
-            "result": result.value,
-        })
-
-
-def _record_attack(
-    attacker: Piece,
-    target: Piece,
-    damage: int,
-    state: GameState,
-) -> None:
-    state.history.append({
-        "type": "attack",
-        "round": state.round_number,
-        "attacker_id": attacker.id,
-        "target_id": target.id,
-        "target_pos": target.pos,
-        "damage": damage,
-        "target_hp_after": target.hp,
-    })
+        if not profile.target_ids:
+            return "Cannon direction has no enemy targets."
+        results: list[str] = []
+        for target_id in profile.target_ids:
+            damage = _apply_damage(state, piece_id, target_id)
+            results.append(f"{_piece_label(target_id)}:{damage}")
+        message = f"{_piece_label(piece_id)} cannon {DIR_LABELS.get(profile.direction, profile.direction)} hits {', '.join(results)}"
+        state.history.append(message)
+        return message
+    return "Invalid cannon direction."

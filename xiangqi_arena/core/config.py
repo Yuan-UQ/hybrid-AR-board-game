@@ -1,10 +1,6 @@
-"""
-Runtime configuration for Xiangqi Arena.
+from dataclasses import dataclass
 
-This module is for adjustable toggles and settings, e.g.:
-- debug flags / verbose logging switches
-- manual initialization / manual input fallback toggles
-- UI configuration
-- recognition system integration settings
-"""
 
+@dataclass(slots=True)
+class GameConfig:
+    random_seed: int = 7
