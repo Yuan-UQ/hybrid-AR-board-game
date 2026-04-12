@@ -1,0 +1,1 @@
+"""Xiangqi Arena package."""
