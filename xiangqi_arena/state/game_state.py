@@ -237,3 +237,83 @@ def build_default_state() -> GameState:
             PieceType.CANNON: (6, 9),
         },
     )
+
+
+def build_from_scanned_deployment(
+    scanned: dict[str, tuple[int, int]],
+) -> GameState:
+    """
+    Build a GameState from piece positions reported by the vision/recognition
+    system after scanning the physical board at game start.
+
+    General and Pawn positions are fixed by the rulebook (Rulebook V3 §7.1–7.2)
+    and are ignored even if present in ``scanned``.  Only ROOK, HORSE, and
+    CANNON positions are extracted from the scan.
+
+    This function is the intended integration point between the recognition
+    pipeline and the game-logic layer.  The recognition system should call it
+    once, immediately after the initial board scan, before the first turn.
+
+    Parameters
+    ----------
+    scanned:
+        Mapping of piece name → (col, row) as returned by the scanner.
+        Required keys for free-deploy pieces::
+
+            "red_rook",   "red_horse",   "red_cannon"
+            "black_rook", "black_horse", "black_cannon"
+
+        Additional keys (e.g. "red_general", "red_pawn_0") are silently ignored.
+
+    Returns
+    -------
+    GameState
+        A fully-initialised game state ready for ``flow.turn.start_turn()``.
+
+    Raises
+    ------
+    ValueError
+        Propagated from ``build_initial_state`` if any required piece position
+        is missing from ``scanned`` or is on the wrong deployment row.
+
+    Examples
+    --------
+    Typical call from the recognition integration layer::
+
+        from xiangqi_arena.state.game_state import build_from_scanned_deployment
+        from xiangqi_arena.flow.turn import start_turn
+
+        scanned = {
+            "red_rook":    (0, 0),
+            "red_horse":   (2, 0),
+            "red_cannon":  (6, 0),
+            "black_rook":  (8, 9),
+            "black_horse": (6, 9),
+            "black_cannon":(2, 9),
+        }
+        state = build_from_scanned_deployment(scanned)
+        start_turn(state)
+    """
+    _name_to_type: dict[str, PieceType] = {
+        "rook":   PieceType.ROOK,
+        "horse":  PieceType.HORSE,
+        "cannon": PieceType.CANNON,
+    }
+    red_free:   dict[PieceType, tuple[int, int]] = {}
+    black_free: dict[PieceType, tuple[int, int]] = {}
+
+    for piece_name, pos in scanned.items():
+        # Expected format: "<faction>_<type>"  e.g. "red_rook", "black_cannon"
+        parts = piece_name.split("_", 1)
+        if len(parts) != 2:
+            continue
+        faction_str, type_str = parts
+        pt = _name_to_type.get(type_str)
+        if pt is None:
+            continue  # general / pawns have fixed positions, skip silently
+        if faction_str == "red":
+            red_free[pt] = pos
+        elif faction_str == "black":
+            black_free[pt] = pos
+
+    return build_initial_state(red_free, black_free)

@@ -70,6 +70,17 @@ def clamp_hp(new_hp: int, max_hp: int) -> int:
     return max(0, min(new_hp, max_hp))
 
 
+def pawn_has_ally_bonus(pawn: Piece, state: GameState) -> bool:
+    """
+    Return True if *pawn* would receive the nearby-ally attack bonus (+1)
+    based on its current position.
+
+    Useful for UI display — shows players that the grouping bonus is active
+    without waiting for an actual attack to be resolved.
+    """
+    return _pawn_ally_bonus(pawn, state) > 0
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ class EventPointType(Enum):
     Types of temporary event points that can spawn on empty board nodes.
     Event points are digital-only; they have no physical marker.
     """
-    AMMUNITION = "ammunition"  # piece gains ATK +1 (permanent, stackable)
+    AMMUNITION = "ammunition"  # piece gains ATK +2 (permanent, stackable)
     MEDICAL    = "medical"     # piece gains HP +1 (clamped to max HP)
     TRAP       = "trap"        # piece loses HP -1
 

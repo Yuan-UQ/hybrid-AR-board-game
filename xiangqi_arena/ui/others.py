@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import pygame
 
-from xiangqi_arena.core.enums import Faction, Phase, VictoryState
+from xiangqi_arena.core.enums import Faction, Phase, PieceType, VictoryState
+from xiangqi_arena.rules.damage_rules import pawn_has_ally_bonus
 from xiangqi_arena.state.game_state import GameState
 from xiangqi_arena.ui.display_config import (
     C_AMMO, C_BLACK_LABEL, C_BTN_BG, C_BTN_HOVER, C_BTN_TEXT,
@@ -35,9 +36,9 @@ BUTTON_RECT = pygame.Rect(BTN_X, BTN_Y, BTN_W, BTN_H)
 
 _PHASE_INSTRUCTIONS: dict[Phase, str] = {
     Phase.START:       "",   # auto-processed, no instruction needed
-    Phase.MOVEMENT:    "Click a piece → click green node  |  Enter = skip",
+    Phase.MOVEMENT:    "Click a piece → click green node  |  Enter=skip  |  S=Surrender  D=Draw",
     Phase.RECOGNITION: "",   # auto-processed
-    Phase.ATTACK:      "Click a red target to attack  |  Enter = skip",
+    Phase.ATTACK:      "Click a red target to attack  |  Enter=skip  |  S=Surrender  D=Draw",
     Phase.RESOLVE:     "",   # auto-processed
 }
 
@@ -134,20 +135,26 @@ def draw_panel(
     for faction in (Faction.RED, Faction.BLACK):
         fc = C_RED_LABEL if faction == Faction.RED else C_BLACK_LABEL
         fn = "Red" if faction == Faction.RED else "Black"
-        flbl = fs.render(f"▶ {fn}", True, fc)
+        draw_tag = "  [Draw?]" if state.players[faction].draw_requested else ""
+        flbl = fs.render(f"▶ {fn}{draw_tag}", True, fc)
         screen.blit(flbl, (PANEL_X + PANEL_PAD, y))
         y += flbl.get_height() + 2
 
         pieces = [p for p in state.pieces.values() if p.faction == faction]
         for p in pieces:
             if p.is_dead:
-                c      = C_MUTED
-                hp_str = "dead"
+                c       = C_MUTED
+                hp_str  = "dead"
                 atk_str = "--"
             else:
-                c       = C_PANEL_TEXT
-                hp_str  = f"{p.hp}/{p.max_hp}"
-                atk_str = str(p.atk)
+                c      = C_PANEL_TEXT
+                hp_str = f"{p.hp}/{p.max_hp}"
+                # Show grouping bonus indicator for Pawns with an active ally nearby
+                if (p.piece_type is PieceType.PAWN
+                        and pawn_has_ally_bonus(p, state)):
+                    atk_str = f"{p.atk}(+1)"
+                else:
+                    atk_str = str(p.atk)
 
             from xiangqi_arena.ui.display_config import PIECE_LABELS
             lbl_char  = PIECE_LABELS.get(p.piece_type.value, "?")
@@ -231,13 +238,15 @@ def draw_victory_overlay(screen: pygame.Surface, state: GameState) -> None:
     # Choose copy and colour by outcome
     if vs == VictoryState.RED_WIN:
         title     = "RED  WINS!"
-        subtitle  = "The Black General has fallen."
+        black_surrendered = state.players[Faction.BLACK].has_surrendered
+        subtitle  = "Black has surrendered." if black_surrendered else "The Black General has fallen."
         box_fill  = (90, 20, 20)
         box_border= C_VICTORY_RED
         title_c   = C_VICTORY_RED
     elif vs == VictoryState.BLACK_WIN:
         title     = "BLACK  WINS!"
-        subtitle  = "The Red General has fallen."
+        red_surrendered = state.players[Faction.RED].has_surrendered
+        subtitle  = "Red has surrendered." if red_surrendered else "The Red General has fallen."
         box_fill  = (20, 20, 70)
         box_border= C_VICTORY_BLK
         title_c   = C_VICTORY_BLK

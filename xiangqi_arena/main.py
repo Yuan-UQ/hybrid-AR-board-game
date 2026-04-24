@@ -43,6 +43,7 @@ from xiangqi_arena.modification.event import apply_event_trigger, spawn_event_po
 from xiangqi_arena.modification.move import apply_move, apply_skip_move
 from xiangqi_arena.rules.event_rules import get_all_triggers
 from xiangqi_arena.rules.piece_rules import legal_attack_targets, legal_moves
+from xiangqi_arena.rules.victory_rules import check_victory
 from xiangqi_arena.state.game_state import GameState, build_default_state
 
 # ---------------------------------------------------------------------------
@@ -300,6 +301,34 @@ def main() -> None:
                         running = False
                     else:
                         sel.deselect()
+                elif (
+                    not game_over
+                    and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
+                    and ev.key == pygame.K_s
+                ):
+                    # Surrender: active player concedes immediately
+                    state.players[state.active_faction].has_surrendered = True
+                    state.victory_state = check_victory(state)
+                    faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
+                    _push(log, f"{faction_name} surrendered!")
+                    game_over = True
+                elif (
+                    not game_over
+                    and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
+                    and ev.key == pygame.K_d
+                ):
+                    # Draw request: toggle this player's flag; draw only when both agree
+                    player = state.players[state.active_faction]
+                    if not player.draw_requested:
+                        player.draw_requested = True
+                        faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
+                        result = check_victory(state)
+                        if result == VictoryState.DRAW:
+                            state.victory_state = result
+                            _push(log, "Both sides agreed — DRAW!")
+                            game_over = True
+                        else:
+                            _push(log, f"{faction_name} requests a draw.")
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 mx, my = ev.pos
