@@ -60,7 +60,10 @@ from xiangqi_arena.ui.display_config import (
 )
 from xiangqi_arena.ui.event_renderer import draw_event_points
 from xiangqi_arena.ui.highlight_renderer import draw_highlights
-from xiangqi_arena.ui.others import BUTTON_RECT, draw_panel, draw_victory_overlay
+from xiangqi_arena.ui.others import (
+    BUTTON_RECT, DRAW_RECT, SURRENDER_RECT,
+    draw_panel, draw_victory_overlay,
+)
 from xiangqi_arena.ui.piece_renderer import draw_pieces
 
 
@@ -77,6 +80,52 @@ def _piece_at(state: GameState, pos: tuple) -> str | None:
 
 def _is_game_over(state: GameState) -> bool:
     return state.victory_state != VictoryState.ONGOING
+
+
+def _try_surrender(state: GameState, log: list[str]) -> bool:
+    """
+    Current active player surrenders immediately.
+    Returns True if the game is now over.
+    """
+    state.players[state.active_faction].has_surrendered = True
+    state.victory_state = check_victory(state)
+    faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
+    _push(log, f"{faction_name} surrendered!")
+    return _is_game_over(state)
+
+
+def _try_draw(state: GameState, log: list[str]) -> bool:
+    """
+    Current active player requests / agrees to a draw.
+    Returns True if the game is now over (DRAW).
+    """
+    player = state.players[state.active_faction]
+    opponent = state.players[state.active_faction.opponent()]
+
+    # If already requested, do nothing (waiting for opponent).
+    if player.draw_requested and not opponent.draw_requested:
+        _push(log, "Draw request already sent; waiting for opponent.")
+        return False
+
+    if not player.draw_requested:
+        player.draw_requested = True
+        if opponent.draw_requested:
+            result = check_victory(state)
+            if result == VictoryState.DRAW:
+                state.victory_state = result
+                _push(log, "Both sides agreed — DRAW!")
+                return True
+        faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
+        _push(log, f"{faction_name} requests a draw.")
+        return False
+
+    # Both already requested (should have ended, but keep it robust)
+    result = check_victory(state)
+    if result == VictoryState.DRAW:
+        state.victory_state = result
+        _push(log, "Both sides agreed — DRAW!")
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +336,32 @@ def main() -> None:
         click_node: tuple | None = None
         mouse_pos            = pygame.mouse.get_pos()
         btn_hover            = BUTTON_RECT.collidepoint(mouse_pos)
+        surrender_hover      = SURRENDER_RECT.collidepoint(mouse_pos)
+        draw_hover           = DRAW_RECT.collidepoint(mouse_pos)
+
+        can_action_buttons = (
+            (not game_over)
+            and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
+        )
+        active_player = state.players[state.active_faction]
+        opponent_player = state.players[state.active_faction.opponent()]
+
+        if not can_action_buttons:
+            draw_label = "Request Draw  [D]"
+            draw_enabled = False
+        else:
+            if opponent_player.draw_requested and not active_player.draw_requested:
+                draw_label = "Agree Draw  [D]"
+                draw_enabled = True
+            elif active_player.draw_requested and not opponent_player.draw_requested:
+                draw_label = "Waiting…"
+                draw_enabled = False
+            elif active_player.draw_requested and opponent_player.draw_requested:
+                draw_label = "DRAW"
+                draw_enabled = False
+            else:
+                draw_label = "Request Draw  [D]"
+                draw_enabled = True
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
@@ -301,38 +376,18 @@ def main() -> None:
                         running = False
                     else:
                         sel.deselect()
-                elif (
-                    not game_over
-                    and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
-                    and ev.key == pygame.K_s
-                ):
-                    # Surrender: active player concedes immediately
-                    state.players[state.active_faction].has_surrendered = True
-                    state.victory_state = check_victory(state)
-                    faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
-                    _push(log, f"{faction_name} surrendered!")
-                    game_over = True
-                elif (
-                    not game_over
-                    and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
-                    and ev.key == pygame.K_d
-                ):
-                    # Draw request: toggle this player's flag; draw only when both agree
-                    player = state.players[state.active_faction]
-                    if not player.draw_requested:
-                        player.draw_requested = True
-                        faction_name = "RED" if state.active_faction == Faction.RED else "BLACK"
-                        result = check_victory(state)
-                        if result == VictoryState.DRAW:
-                            state.victory_state = result
-                            _push(log, "Both sides agreed — DRAW!")
-                            game_over = True
-                        else:
-                            _push(log, f"{faction_name} requests a draw.")
+                elif can_action_buttons and ev.key == pygame.K_s:
+                    game_over = _try_surrender(state, log)
+                elif can_action_buttons and ev.key == pygame.K_d:
+                    game_over = _try_draw(state, log)
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 mx, my = ev.pos
-                if BUTTON_RECT.collidepoint(mx, my):
+                if can_action_buttons and SURRENDER_RECT.collidepoint(mx, my):
+                    game_over = _try_surrender(state, log)
+                elif can_action_buttons and draw_enabled and DRAW_RECT.collidepoint(mx, my):
+                    game_over = _try_draw(state, log)
+                elif BUTTON_RECT.collidepoint(mx, my):
                     confirm = True
                 else:
                     click_node = pixel_to_node(mx, my)
@@ -406,6 +461,11 @@ def main() -> None:
             log       = log,
             btn_label = btn_lbl,
             btn_hover = btn_hover,
+            surrender_hover = surrender_hover,
+            surrender_enabled = can_action_buttons,
+            draw_label = draw_label,
+            draw_hover = draw_hover,
+            draw_enabled = (can_action_buttons and draw_enabled),
         )
 
         if game_over:

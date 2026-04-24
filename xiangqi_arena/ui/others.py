@@ -26,19 +26,36 @@ from xiangqi_arena.ui.display_config import (
 )
 from xiangqi_arena.core.enums import EventPointType
 
-# Button rect (computed once)
-BTN_W  = PANEL_W - PANEL_PAD * 2
-BTN_H  = 36
-BTN_X  = PANEL_X + PANEL_PAD
-BTN_Y  = WINDOW_H - BTN_H - PANEL_PAD - 12
+# ---------------------------------------------------------------------------
+# Bottom action buttons (computed once)
+# ---------------------------------------------------------------------------
+BTN_W = PANEL_W - PANEL_PAD * 2
+BTN_X = PANEL_X + PANEL_PAD
 
+_BOTTOM_PAD = PANEL_PAD + 12
+_ROW_GAP = 8
+
+# Row 1 (top): Skip current action
+BTN_H = 36
+BTN_Y = WINDOW_H - _BOTTOM_PAD - (2 * BTN_H + _ROW_GAP)
 BUTTON_RECT = pygame.Rect(BTN_X, BTN_Y, BTN_W, BTN_H)
+
+# Row 2 (bottom): Surrender / Draw
+ACTION_BTN_H = 34
+ACTION_ROW_Y = BUTTON_RECT.bottom + _ROW_GAP
+_ACTION_GAP = 8
+_HALF_W = (BTN_W - _ACTION_GAP) // 2
+SURRENDER_RECT = pygame.Rect(BTN_X, ACTION_ROW_Y, _HALF_W, ACTION_BTN_H)
+DRAW_RECT = pygame.Rect(BTN_X + _HALF_W + _ACTION_GAP, ACTION_ROW_Y, _HALF_W, ACTION_BTN_H)
+
+# Top y of the whole button area (used to cap the log so it never overlaps)
+BUTTONS_TOP_Y = BUTTON_RECT.top
 
 _PHASE_INSTRUCTIONS: dict[Phase, str] = {
     Phase.START:       "",   # auto-processed, no instruction needed
-    Phase.MOVEMENT:    "Click a piece → click green node  |  Enter=skip  |  S=Surrender  D=Draw",
+    Phase.MOVEMENT:    "Click a piece → click green node  |  Enter=skip  |  S/D or buttons below",
     Phase.RECOGNITION: "",   # auto-processed
-    Phase.ATTACK:      "Click a red target to attack  |  Enter=skip  |  S=Surrender  D=Draw",
+    Phase.ATTACK:      "Click a red target to attack  |  Enter=skip  |  S/D or buttons below",
     Phase.RESOLVE:     "",   # auto-processed
 }
 
@@ -72,6 +89,12 @@ def draw_panel(
     log: list[str] | None = None,
     btn_label: str = "Skip / End Turn",
     btn_hover: bool = False,
+    surrender_label: str = "Surrender  [S]",
+    surrender_hover: bool = False,
+    surrender_enabled: bool = True,
+    draw_label: str = "Request Draw  [D]",
+    draw_hover: bool = False,
+    draw_enabled: bool = True,
 ) -> None:
     """
     Render the full right-side info panel.
@@ -206,10 +229,10 @@ def draw_panel(
                 s = fs.render(line, True, ec)
                 screen.blit(s, (PANEL_X + PANEL_PAD, y))
                 y += s.get_height() + 2
-            if y > BTN_Y - 14:   # don't overflow into the button
+            if y > BUTTONS_TOP_Y - 14:   # don't overflow into the button area
                 break
 
-    # --- Skip / End-Turn button ---
+    # --- Skip / End-Turn button (row 1) ---
     btn_colour = C_BTN_HOVER if btn_hover else C_BTN_BG
     pygame.draw.rect(screen, btn_colour, BUTTON_RECT, border_radius=6)
     pygame.draw.rect(screen, C_PANEL_BORDER, BUTTON_RECT, 1, border_radius=6)
@@ -217,6 +240,38 @@ def draw_panel(
     screen.blit(btn_surf, (
         BUTTON_RECT.centerx - btn_surf.get_width() // 2,
         BUTTON_RECT.centery - btn_surf.get_height() // 2,
+    ))
+
+    # --- Surrender / Draw buttons (row 2) ---
+    disabled_bg = (70, 70, 70)
+    disabled_text = (150, 150, 150)
+
+    s_bg = (
+        (C_BTN_HOVER if surrender_hover else C_BTN_BG)
+        if surrender_enabled
+        else disabled_bg
+    )
+    s_tc = C_BTN_TEXT if surrender_enabled else disabled_text
+    pygame.draw.rect(screen, s_bg, SURRENDER_RECT, border_radius=6)
+    pygame.draw.rect(screen, C_PANEL_BORDER, SURRENDER_RECT, 1, border_radius=6)
+    s_surf = fbtn.render(surrender_label, True, s_tc)
+    screen.blit(s_surf, (
+        SURRENDER_RECT.centerx - s_surf.get_width() // 2,
+        SURRENDER_RECT.centery - s_surf.get_height() // 2,
+    ))
+
+    d_bg = (
+        (C_BTN_HOVER if draw_hover else C_BTN_BG)
+        if draw_enabled
+        else disabled_bg
+    )
+    d_tc = C_BTN_TEXT if draw_enabled else disabled_text
+    pygame.draw.rect(screen, d_bg, DRAW_RECT, border_radius=6)
+    pygame.draw.rect(screen, C_PANEL_BORDER, DRAW_RECT, 1, border_radius=6)
+    d_surf = fbtn.render(draw_label, True, d_tc)
+    screen.blit(d_surf, (
+        DRAW_RECT.centerx - d_surf.get_width() // 2,
+        DRAW_RECT.centery - d_surf.get_height() // 2,
     ))
 
 
