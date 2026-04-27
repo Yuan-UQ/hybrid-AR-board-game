@@ -12,9 +12,8 @@ from pathlib import Path
 import pygame
 
 from xiangqi_arena.core.constants import BOARD_COLS, BOARD_ROWS
+import xiangqi_arena.ui.display_config as dcfg
 from xiangqi_arena.ui.display_config import (
-    BOARD_IMAGE_H, BOARD_IMAGE_LEFT, BOARD_IMAGE_TOP, BOARD_IMAGE_W,
-    BOARD_LEFT, BOARD_TOP, CELL,
     C_BG, C_BOARD_LINE, C_PALACE_LINE, C_RIVER_FILL,
 )
 
@@ -116,18 +115,26 @@ BOARD_POINTS: dict[tuple[int, int], list[int]] = {
 }
 
 _BOARD_IMAGE: pygame.Surface | None = None
+_BOARD_BACKDROP: pygame.Surface | None = None
+
+
+def invalidate_board_image_cache() -> None:
+    """Call after window resize / layout change so the board image rescales."""
+    global _BOARD_IMAGE, _BOARD_BACKDROP
+    _BOARD_IMAGE = None
+    _BOARD_BACKDROP = None
 
 
 def node_to_pixel(x: int, y: int) -> tuple[int, int]:
     """Convert a board node (x=0..9, y=0..8) to screen pixel (px, py)."""
     native_x, native_y = BOARD_POINTS[(x, y)]
-    px = BOARD_IMAGE_LEFT + round(native_x / _IMAGE_NATIVE_W * BOARD_IMAGE_W)
-    py = BOARD_IMAGE_TOP + round(native_y / _IMAGE_NATIVE_H * BOARD_IMAGE_H)
+    px = dcfg.BOARD_IMAGE_LEFT + round(native_x / _IMAGE_NATIVE_W * dcfg.BOARD_IMAGE_W)
+    py = dcfg.BOARD_IMAGE_TOP + round(native_y / _IMAGE_NATIVE_H * dcfg.BOARD_IMAGE_H)
     return px, py
 
 
 def _draw_board_image(screen: pygame.Surface) -> None:
-    global _BOARD_IMAGE
+    global _BOARD_IMAGE, _BOARD_BACKDROP
 
     if _BOARD_IMAGE is None:
         image_path = (
@@ -137,12 +144,26 @@ def _draw_board_image(screen: pygame.Surface) -> None:
             / "ChessBoardWithBackground.png"
         )
         image = pygame.image.load(str(image_path)).convert()
+        # Backdrop: scale to the *available* board area to visually reduce letterboxing.
+        # This can stretch, but it's drawn subtly under the true aspect-ratio board.
+        _BOARD_BACKDROP = pygame.transform.smoothscale(
+            image,
+            (max(1, dcfg.BOARD_AVAIL_W), max(1, dcfg.BOARD_AVAIL_H)),
+        )
+        _BOARD_BACKDROP.set_alpha(90)
         _BOARD_IMAGE = pygame.transform.smoothscale(
             image,
-            (BOARD_IMAGE_W, BOARD_IMAGE_H),
+            (dcfg.BOARD_IMAGE_W, dcfg.BOARD_IMAGE_H),
         )
 
-    screen.blit(_BOARD_IMAGE, (BOARD_IMAGE_LEFT, BOARD_IMAGE_TOP))
+    if _BOARD_BACKDROP is not None:
+        screen.blit(_BOARD_BACKDROP, (dcfg.BOARD_AVAIL_LEFT, dcfg.BOARD_AVAIL_TOP))
+        # Slight dark overlay to keep focus on the main board.
+        shade = pygame.Surface((dcfg.BOARD_AVAIL_W, dcfg.BOARD_AVAIL_H), pygame.SRCALPHA)
+        shade.fill((0, 0, 0, 55))
+        screen.blit(shade, (dcfg.BOARD_AVAIL_LEFT, dcfg.BOARD_AVAIL_TOP))
+
+    screen.blit(_BOARD_IMAGE, (dcfg.BOARD_IMAGE_LEFT, dcfg.BOARD_IMAGE_TOP))
 
 
 def draw_board(screen: pygame.Surface) -> None:
@@ -157,8 +178,8 @@ def draw_board(screen: pygame.Surface) -> None:
 
 def _draw_background(screen: pygame.Surface) -> None:
     board_rect = pygame.Rect(
-        BOARD_LEFT - 15, BOARD_TOP - 15,
-        9 * CELL + 30, 8 * CELL + 30,
+        dcfg.BOARD_LEFT - 15, dcfg.BOARD_TOP - 15,
+        9 * dcfg.CELL + 30, 8 * dcfg.CELL + 30,
     )
     pygame.draw.rect(screen, C_BG, board_rect, border_radius=6)
     pygame.draw.rect(screen, C_BOARD_LINE, board_rect, width=2, border_radius=6)
@@ -207,11 +228,13 @@ def _draw_palaces(screen: pygame.Surface) -> None:
 
 def _draw_nodes(screen: pygame.Surface) -> None:
     """Draw green dots at every legal board node."""
+    r_out = max(2, int(4 * dcfg.UI_SCALE + 0.5))
+    r_in = max(1, r_out - 2)
     for x in range(BOARD_COLS):
         for y in range(BOARD_ROWS):
             px, py = node_to_pixel(x, y)
-            pygame.draw.circle(screen, (10, 70, 20), (px, py), 5)
-            pygame.draw.circle(screen, (0, 255, 80), (px, py), 3)
+            pygame.draw.circle(screen, (10, 70, 20), (px, py), r_out)
+            pygame.draw.circle(screen, (0, 255, 80), (px, py), r_in)
 
 
 def _draw_labels(screen: pygame.Surface) -> None:

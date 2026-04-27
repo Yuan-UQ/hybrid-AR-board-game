@@ -100,4 +100,4 @@ WIZARD_ATTACK_DIST: int = 3 # must be exactly 3 nodes away in one direction
 # ---------------------------------------------------------------------------
 
 EVENT_POINT_SPAWN_ON_ODD_ROUNDS: bool = True
-MAX_EVENT_POINTS_ON_BOARD: int = 1
+MAX_EVENT_POINTS_ON_BOARD: int = 2

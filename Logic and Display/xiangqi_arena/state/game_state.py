@@ -240,3 +240,40 @@ def build_default_state() -> GameState:
             PieceType.WIZARD: (0, 2),
         },
     )
+
+
+def build_from_scanned_deployment(
+    scanned: dict[str, tuple[int, int]],
+) -> GameState:
+    """
+    Build a GameState from piece positions reported by the vision/recognition
+    system after scanning the physical board at game start.
+
+    Leader and Soldier positions are fixed by the rulebook and are ignored even
+    if present in ``scanned``. Only the free-deploy pieces are extracted.
+
+    Expected keys (piece_id) for free-deploy pieces:
+      - HumanSide:  ArcherHuman, LancerHuman, WizardHuman
+      - OrcSide:    ArcherSkeleton, RiderOrc, Slime Orc
+    """
+    human_map: dict[str, PieceType] = {
+        "ArcherHuman": PieceType.ARCHER,
+        "LancerHuman": PieceType.LANCER,
+        "WizardHuman": PieceType.WIZARD,
+    }
+    orc_map: dict[str, PieceType] = {
+        "ArcherSkeleton": PieceType.ARCHER,
+        "RiderOrc": PieceType.LANCER,
+        "Slime Orc": PieceType.WIZARD,
+    }
+
+    HumanSide_free: dict[PieceType, tuple[int, int]] = {}
+    OrcSide_free: dict[PieceType, tuple[int, int]] = {}
+
+    for piece_id, pos in scanned.items():
+        if piece_id in human_map:
+            HumanSide_free[human_map[piece_id]] = pos
+        elif piece_id in orc_map:
+            OrcSide_free[orc_map[piece_id]] = pos
+
+    return build_initial_state(HumanSide_free=HumanSide_free, OrcSide_free=OrcSide_free)

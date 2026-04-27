@@ -28,7 +28,11 @@ from xiangqi_arena.models.event_point import EventPoint
 from xiangqi_arena.rules.event_rules import get_all_triggers, get_triggered_piece
 from xiangqi_arena.rules.piece_rules import legal_attack_targets, legal_moves
 from xiangqi_arena.rules.victory_rules import check_victory
-from xiangqi_arena.state.game_state import GameState, build_default_state
+from xiangqi_arena.state.game_state import (
+    GameState,
+    build_default_state,
+    build_from_scanned_deployment,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -380,6 +384,52 @@ def scenario_event_points():
     expected_atk = base_atk + 3 * 2   # base + three +2 stacks
     assert wizard.atk == expected_atk, f"Expected {expected_atk}, got {wizard.atk}"
     ok(f"AMMUNITION stacks: wizard ATK = {wizard.atk} (base {base_atk} + 3×2 buffs)")
+
+
+# ===========================================================================
+# Scenario X: Surrender and draw agreement
+# ===========================================================================
+
+@scenario("Surrender: active player loses immediately")
+def scenario_surrender():
+    gs = build_default_state()
+    section("Scenario — Surrender")
+    assert check_victory(gs) is VictoryState.ONGOING
+    gs.players[Faction.HumanSide].has_surrendered = True
+    assert check_victory(gs) is VictoryState.OrcSide_WIN
+    ok("HumanSide surrendered → OrcSide win")
+
+
+@scenario("Draw agreement: request then agree next turn")
+def scenario_draw_agreement():
+    gs = build_default_state()
+    section("Scenario — Draw agreement")
+    gs.players[Faction.HumanSide].draw_requested = True
+    assert check_victory(gs) is VictoryState.ONGOING
+    gs.players[Faction.OrcSide].draw_requested = True
+    assert check_victory(gs) is VictoryState.DRAW
+    ok("Both sides requested draw → DRAW")
+
+
+# ===========================================================================
+# Scenario X: Build state from scanned deployment
+# ===========================================================================
+
+@scenario("Deployment scan: build_from_scanned_deployment")
+def scenario_scanned_deployment():
+    section("Scenario — Deployment scan factory")
+    scanned = {
+        "ArcherHuman": (9, 0),
+        "LancerHuman": (9, 2),
+        "WizardHuman": (9, 6),
+        "ArcherSkeleton": (0, 8),
+        "RiderOrc": (0, 6),
+        "Slime Orc": (0, 2),
+    }
+    gs = build_from_scanned_deployment(scanned)
+    assert gs.pieces["ArcherHuman"].pos == (9, 0)
+    assert gs.pieces["Slime Orc"].pos == (0, 2)
+    ok("GameState built from scanned deployment dict")
 
 
 # ===========================================================================

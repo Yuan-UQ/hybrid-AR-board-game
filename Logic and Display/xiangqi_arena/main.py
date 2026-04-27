@@ -44,6 +44,7 @@ from xiangqi_arena.modification.event import apply_event_trigger, spawn_event_po
 from xiangqi_arena.modification.move import apply_move, apply_skip_move
 from xiangqi_arena.rules.event_rules import get_all_triggers
 from xiangqi_arena.rules.piece_rules import legal_attack_targets, legal_moves
+from xiangqi_arena.rules.victory_rules import check_victory
 from xiangqi_arena.state.game_state import GameState, build_default_state
 
 # ---------------------------------------------------------------------------
@@ -53,11 +54,10 @@ from xiangqi_arena.input_control.keyboard_handler import KeyAction, classify_key
 from xiangqi_arena.input_control.selection_handler import (
     SelectionState, pixel_to_node,
 )
-from xiangqi_arena.ui.board_renderer import draw_board
+from xiangqi_arena.ui import display_config
+from xiangqi_arena.ui.board_renderer import draw_board, invalidate_board_image_cache
 from xiangqi_arena.ui.death_marker_renderer import draw_dead_pieces
-from xiangqi_arena.ui.display_config import (
-    FPS, WINDOW_H, WINDOW_TITLE, WINDOW_W,
-)
+from xiangqi_arena.ui.piece_renderer import invalidate_layout_caches
 from xiangqi_arena.ui.event_renderer import (
     draw_event_points,
     draw_heal_effect_overlays,
@@ -71,7 +71,12 @@ from xiangqi_arena.ui.highlight_renderer import (
     draw_highlights,
     draw_selected_arrow,
 )
-from xiangqi_arena.ui.others import BUTTON_RECT, draw_panel, draw_victory_overlay
+import xiangqi_arena.ui.others as ui_others
+from xiangqi_arena.ui.others import (
+    BUTTON_RECT, DRAW_RECT, SURRENDER_RECT,
+    draw_panel, draw_top_bar, draw_victory_overlay, reset_panel_fonts, sync_button_rects_from_config,
+    LOG_EXPAND_RECT, LOG_MODAL_CLOSE_RECT, LOG_MODAL_SCROLLBAR_RECT, LOG_MODAL_THUMB_RECT,
+)
 from xiangqi_arena.ui.piece_renderer import (
     draw_attack_hit_effects,
     draw_pieces,
@@ -91,7 +96,8 @@ from xiangqi_arena.ui.ranged_attack_renderer import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-LOG_MAX = 15   # keep at most this many log entries
+LOG_MAX = 15   # side panel uses only the latest few anyway
+LOG_HISTORY_MAX = 2000
 WALK_ANIM_MS = 1500
 VICTORY_OVERLAY_DELAY_MS = 500
 
@@ -102,6 +108,42 @@ def _piece_at(state: GameState, pos: tuple) -> str | None:
 
 def _is_game_over(state: GameState) -> bool:
     return state.victory_state != VictoryState.ONGOING
+
+
+def _try_surrender(state: GameState, log: list[str], history: list[str]) -> bool:
+    state.players[state.active_faction].has_surrendered = True
+    state.victory_state = check_victory(state)
+    faction_name = "HUMANSIDE" if state.active_faction == Faction.HumanSide else "ORCSIDE"
+    _push(log, f"{faction_name} surrendered!", history=history)
+    return _is_game_over(state)
+
+
+def _try_draw(state: GameState, log: list[str], history: list[str]) -> bool:
+    player = state.players[state.active_faction]
+    opponent = state.players[state.active_faction.opponent()]
+
+    if player.draw_requested and not opponent.draw_requested:
+        _push(log, "Draw request already sent; waiting for opponent.", history=history)
+        return False
+
+    if not player.draw_requested:
+        player.draw_requested = True
+        if opponent.draw_requested:
+            result = check_victory(state)
+            if result == VictoryState.DRAW:
+                state.victory_state = result
+                _push(log, "Both sides agreed — DRAW!", history=history)
+                return True
+        faction_name = "HUMANSIDE" if state.active_faction == Faction.HumanSide else "ORCSIDE"
+        _push(log, f"{faction_name} requests a draw.", history=history)
+        return False
+
+    result = check_victory(state)
+    if result == VictoryState.DRAW:
+        state.victory_state = result
+        _push(log, "Both sides agreed — DRAW!", history=history)
+        return True
+    return False
 
 
 def _wizard_aoe_display_nodes(centers: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -125,6 +167,7 @@ def _drain_auto_phases(
     state: GameState,
     sel: SelectionState,
     log: list[str],
+    log_history: list[str],
     game_over_ref: list[bool],
     pending_event_ref: list[dict | None],
 ) -> None:
@@ -147,7 +190,7 @@ def _drain_auto_phases(
                     f"{ep.event_type.value}@{ep.pos}"
                     for ep in state.event_points
                 ]
-                _push(log, "✦ Spawned: " + "  /  ".join(descs))
+                _push(log, "✦ Spawned: " + "  /  ".join(descs), history=log_history)
             advance_phase(state)   # → MOVEMENT
 
         elif phase == Phase.RECOGNITION:
@@ -161,7 +204,7 @@ def _drain_auto_phases(
                         "effect_started": False,
                         "heal_effect": None,
                     }
-                    _push(log, f"✦ {pid} reached {ep.event_type.value}@{ep.pos}")
+                    _push(log, f"✦ {pid} reached {ep.event_type.value}@{ep.pos}", history=log_history)
                     return
             advance_phase(state)   # → ATTACK
 
@@ -182,12 +225,22 @@ def _drain_auto_phases(
             break
 
 
-def _push(log: list[str], msg: str) -> None:
-    """Prepend *msg* to *log* (newest first), trimming to LOG_MAX."""
-    if msg.strip():
-        log.insert(0, msg)
-        while len(log) > LOG_MAX:
-            log.pop()
+def _push(log: list[str], msg: str, *, history: list[str] | None = None) -> None:
+    """
+    Prepend *msg* to *log* (newest first).
+
+    - `log` is the short list used by the side panel.
+    - `history` (optional) keeps a longer record for the Log modal.
+    """
+    if not msg.strip():
+        return
+    log.insert(0, msg)
+    while len(log) > LOG_MAX:
+        log.pop()
+    if history is not None:
+        history.insert(0, msg)
+        while len(history) > LOG_HISTORY_MAX:
+            history.pop()
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +374,29 @@ def _handle_attack(
 # Main
 # ---------------------------------------------------------------------------
 
+def _rebuild_ui_after_window_resize(new_w: int, new_h: int) -> pygame.Surface:
+    """
+    Recompute layout (panels, board rect, node snap, font scale) and
+    refresh caches after the user resizes the window.
+    """
+    display_config.apply_layout_for_window_size(new_w, new_h)
+    invalidate_board_image_cache()
+    invalidate_layout_caches()
+    reset_panel_fonts()
+    sync_button_rects_from_config()
+    return pygame.display.set_mode(
+        (display_config.WINDOW_W, display_config.WINDOW_H),
+        pygame.RESIZABLE,
+    )
+
+
 def main() -> None:
     pygame.init()
-    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption(WINDOW_TITLE)
+    screen = pygame.display.set_mode(
+        (display_config.WINDOW_W, display_config.WINDOW_H),
+        pygame.RESIZABLE,
+    )
+    pygame.display.set_caption(display_config.WINDOW_TITLE)
     clock  = pygame.time.Clock()
 
     state: GameState = build_default_state()
@@ -332,20 +404,25 @@ def main() -> None:
 
     sel           = SelectionState()
     log: list[str] = []
+    log_history: list[str] = []
     game_over_ref  = [False]
     pending_attack_ref: list[dict | None] = [None]
     pending_event_ref: list[dict | None] = [None]
     victory_overlay_ref: list[dict | None] = [None]
 
     # Drain the first START phase so we land on MOVEMENT immediately
-    _drain_auto_phases(state, sel, log, game_over_ref, pending_event_ref)
+    _drain_auto_phases(state, sel, log, log_history, game_over_ref, pending_event_ref)
     game_over = game_over_ref[0]
 
     # Announce whose turn it is at startup
     faction = "HUMANSIDE" if state.active_faction == Faction.HumanSide else "ORCSIDE"
-    _push(log, f"Round {state.round_number} — {faction}'s turn")
+    _push(log, f"Round {state.round_number} — {faction}'s turn", history=log_history)
 
     running = True
+    log_modal_open = False
+    log_modal_scroll = 0
+    log_modal_dragging = False
+    log_modal_drag_offset_y = 0
     while running:
         # ----------------------------------------------------------------
         # Event polling
@@ -354,10 +431,52 @@ def main() -> None:
         click_node: tuple | None = None
         mouse_pos            = pygame.mouse.get_pos()
         btn_hover            = BUTTON_RECT.collidepoint(mouse_pos)
+        surrender_hover      = SURRENDER_RECT.collidepoint(mouse_pos)
+        draw_hover           = DRAW_RECT.collidepoint(mouse_pos)
+
+        can_action_buttons = (
+            (not game_over)
+            and state.current_phase in (Phase.MOVEMENT, Phase.ATTACK)
+        )
+        active_player = state.players[state.active_faction]
+        opponent_player = state.players[state.active_faction.opponent()]
+
+        if not can_action_buttons:
+            draw_label = "Request Draw [D]"
+            draw_enabled = False
+        else:
+            if opponent_player.draw_requested and not active_player.draw_requested:
+                draw_label = "Agree Draw [D]"
+                draw_enabled = True
+            elif active_player.draw_requested and not opponent_player.draw_requested:
+                draw_label = "Waiting…"
+                draw_enabled = False
+            elif active_player.draw_requested and opponent_player.draw_requested:
+                draw_label = "DRAW"
+                draw_enabled = False
+            else:
+                draw_label = "Request Draw [D]"
+                draw_enabled = True
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
+
+            elif ev.type == pygame.VIDEORESIZE:
+                w, h = int(ev.w), int(ev.h)
+                if w > 0 and h > 0:
+                    screen = _rebuild_ui_after_window_resize(w, h)
+                    # keep modal scroll in range after resize
+                    log_modal_scroll = 0
+
+            elif ev.type == pygame.MOUSEWHEEL:
+                if log_modal_open:
+                    # Scroll log modal (positive y = up). Prefer precise_y on mac trackpads.
+                    dy = getattr(ev, "precise_y", None)
+                    if dy is None:
+                        dy = ev.y
+                    step = max(1, int(round(float(dy) * 6)))
+                    log_modal_scroll = max(0, min(ui_others.LOG_MODAL_MAX_SCROLL, log_modal_scroll - step))
 
             elif ev.type == pygame.KEYDOWN:
                 ka = classify_key(ev)
@@ -368,13 +487,74 @@ def main() -> None:
                         running = False
                     else:
                         sel.deselect()
+                elif ev.key == pygame.K_ESCAPE and log_modal_open:
+                    log_modal_open = False
+                elif can_action_buttons and ev.key == pygame.K_s:
+                    game_over = _try_surrender(state, log, log_history)
+                elif can_action_buttons and ev.key == pygame.K_d:
+                    game_over = _try_draw(state, log, log_history)
 
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 mx, my = ev.pos
-                if BUTTON_RECT.collidepoint(mx, my):
-                    confirm = True
+                if log_modal_open:
+                    if LOG_MODAL_CLOSE_RECT.collidepoint(mx, my):
+                        log_modal_open = False
+                        log_modal_dragging = False
+                        continue
+                    if LOG_MODAL_SCROLLBAR_RECT.collidepoint(mx, my) and not LOG_MODAL_THUMB_RECT.collidepoint(mx, my):
+                        # Jump thumb toward click position.
+                        track_top = LOG_MODAL_SCROLLBAR_RECT.y + 2
+                        track_h = LOG_MODAL_SCROLLBAR_RECT.height - 4
+                        thumb_h = LOG_MODAL_THUMB_RECT.height
+                        usable = max(1, track_h - thumb_h)
+                        new_thumb_y = max(track_top, min(track_top + usable, my - thumb_h // 2))
+                        ratio = (new_thumb_y - track_top) / usable
+                        log_modal_scroll = int(round(ratio * max(1, ui_others.LOG_MODAL_MAX_SCROLL)))
+                        continue
+                    if LOG_MODAL_THUMB_RECT.collidepoint(mx, my):
+                        log_modal_dragging = True
+                        log_modal_drag_offset_y = my - LOG_MODAL_THUMB_RECT.y
+                        continue
+                    # Click outside controls closes modal.
+                    log_modal_open = False
+                    log_modal_dragging = False
+                    continue
                 else:
-                    click_node = pixel_to_node(mx, my)
+                    if LOG_EXPAND_RECT.collidepoint(mx, my):
+                        log_modal_open = True
+                        log_modal_scroll = 0
+                        log_modal_dragging = False
+                        continue
+                    # Normal in-game clicks
+                    if can_action_buttons and SURRENDER_RECT.collidepoint(mx, my):
+                        game_over = _try_surrender(state, log, log_history)
+                    elif can_action_buttons and draw_enabled and DRAW_RECT.collidepoint(mx, my):
+                        game_over = _try_draw(state, log, log_history)
+                    elif BUTTON_RECT.collidepoint(mx, my):
+                        confirm = True
+                    else:
+                        click_node = pixel_to_node(mx, my)
+            elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                if log_modal_dragging:
+                    log_modal_dragging = False
+
+            elif ev.type == pygame.MOUSEMOTION:
+                if log_modal_open and log_modal_dragging:
+                    mx, my = ev.pos
+                    # Map thumb position to scroll index approximately.
+                    track_top = LOG_MODAL_SCROLLBAR_RECT.y + 2
+                    track_h = LOG_MODAL_SCROLLBAR_RECT.height - 4
+                    thumb_h = LOG_MODAL_THUMB_RECT.height
+                    usable = max(1, track_h - thumb_h)
+                    new_thumb_y = max(track_top, min(track_top + usable, my - log_modal_drag_offset_y))
+                    ratio = (new_thumb_y - track_top) / usable
+                    log_modal_scroll = int(round(ratio * max(1, ui_others.LOG_MODAL_MAX_SCROLL)))
+
+            elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button in (4, 5):
+                # mac / some mice emit wheel as buttons
+                if log_modal_open:
+                    delta = 1 if ev.button == 5 else -1
+                    log_modal_scroll = max(0, min(ui_others.LOG_MODAL_MAX_SCROLL, log_modal_scroll + delta * 3))
 
         # ----------------------------------------------------------------
         # Interactive phase handling
@@ -394,7 +574,7 @@ def main() -> None:
                         apply_attack(attacker_id, target_pos, state)
                     advance_phase(state)
                     pending_attack_ref[0] = None
-                    _push(log, f"{attacker_id} hit {target_pos}")
+                    _push(log, f"{attacker_id} hit {target_pos}", history=log_history)
             elif pending_event_ref[0] is not None:
                 pending_event = pending_event_ref[0]
                 piece_id = str(pending_event["piece_id"])
@@ -417,17 +597,17 @@ def main() -> None:
                                 state,
                                 spawn_heal_effect=False,
                             )
-                            _push(log, f"✦ {piece_id} → {event_point.event_type.value}!")
+                            _push(log, f"✦ {piece_id} → {event_point.event_type.value}!", history=log_history)
                             pending_event_ref[0] = None
                     else:
                         apply_event_trigger(piece_id, event_point, state)
-                        _push(log, f"✦ {piece_id} → {event_point.event_type.value}!")
+                        _push(log, f"✦ {piece_id} → {event_point.event_type.value}!", history=log_history)
                         pending_event_ref[0] = None
 
             elif phase == Phase.MOVEMENT:
                 msg = _handle_movement(state, sel, confirm, click_node)
                 if msg:
-                    _push(log, msg)
+                    _push(log, msg, history=log_history)
 
             elif phase == Phase.ATTACK:
                 if sel.has_selection and not sel.valid_attacks:
@@ -438,7 +618,7 @@ def main() -> None:
 
                 msg = _handle_attack(state, sel, confirm, click_node, pending_attack_ref)
                 if msg:
-                    _push(log, msg)
+                    _push(log, msg, history=log_history)
 
             # ── Drain any auto-phases that were triggered ────────────────
             prev_round   = state.round_number
@@ -446,7 +626,7 @@ def main() -> None:
 
             if pending_attack_ref[0] is None and pending_event_ref[0] is None:
                 game_over_ref[0] = game_over
-                _drain_auto_phases(state, sel, log, game_over_ref, pending_event_ref)
+                _drain_auto_phases(state, sel, log, log_history, game_over_ref, pending_event_ref)
                 game_over = game_over_ref[0]
 
             # If the turn changed, log the new player's turn header
@@ -454,7 +634,7 @@ def main() -> None:
                     or state.active_faction != prev_faction):
                 new_faction = ("HUMANSIDE" if state.active_faction == Faction.HumanSide
                                else "ORCSIDE")
-                _push(log, f"Round {state.round_number} — {new_faction}'s turn")
+                _push(log, f"Round {state.round_number} — {new_faction}'s turn", history=log_history)
 
             if _is_game_over(state) and not game_over:
                 game_over = True
@@ -474,6 +654,7 @@ def main() -> None:
         # Render
         # ----------------------------------------------------------------
         screen.fill((50, 40, 30))
+        draw_top_bar(screen)
         draw_board(screen)
         draw_dead_pieces(screen, state)
         draw_event_points(screen, state, draw_heal_effects=False)
@@ -527,12 +708,19 @@ def main() -> None:
             "…"
         )
 
-        draw_panel(
+        log_modal_scroll = draw_panel(
             screen, state,
-            log       = log,
+            log       = (log_history if log_modal_open else log),
             btn_label = btn_lbl,
             btn_hover = btn_hover,
+            surrender_hover = surrender_hover,
+            surrender_enabled = can_action_buttons,
+            draw_label = draw_label,
+            draw_hover = draw_hover,
+            draw_enabled = (can_action_buttons and draw_enabled),
             selected_pid = sel.selected_pid,
+            log_modal_open = log_modal_open,
+            log_modal_scroll = log_modal_scroll,
         )
 
         if game_over:
@@ -561,7 +749,7 @@ def main() -> None:
                             draw_victory_overlay(screen, state)
 
         pygame.display.flip()
-        clock.tick(FPS)
+        clock.tick(display_config.FPS)
 
     pygame.quit()
     sys.exit(0)

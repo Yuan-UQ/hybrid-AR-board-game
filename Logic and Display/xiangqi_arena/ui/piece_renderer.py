@@ -18,6 +18,7 @@ from xiangqi_arena.rules.buff_rules import (
 )
 from xiangqi_arena.state.game_state import GameState
 from xiangqi_arena.ui.board_renderer import node_to_pixel
+import xiangqi_arena.ui.display_config as dcfg
 from xiangqi_arena.ui.display_config import (
     C_ORCSIDE_FILL, C_HP_EMPTY, C_HP_FULL, C_PIECE_BORDER, C_PIECE_TEXT,
     C_HUMANSIDE_FILL, HP_BAR_H, HP_BAR_OFFSET_Y, HP_BAR_W, PIECE_LABELS,
@@ -268,11 +269,22 @@ _SPRITE_CONFIG = {
 def _get_fonts() -> tuple[pygame.font.Font, pygame.font.Font]:
     global _FONT_PIECE, _FONT_HP
     if _FONT_PIECE is None:
-        _FONT_PIECE = pygame.font.Font(None, 17)
+        sz = max(12, min(24, int(17 * dcfg.UI_SCALE)))
+        _FONT_PIECE = pygame.font.Font(None, sz)
         _FONT_PIECE.set_bold(True)
     if _FONT_HP is None:
-        _FONT_HP = pygame.font.Font(None, 10)
+        sz = max(8, min(16, int(10 * dcfg.UI_SCALE)))
+        _FONT_HP = pygame.font.Font(None, sz)
     return _FONT_PIECE, _FONT_HP
+
+
+def invalidate_layout_caches() -> None:
+    """Clear font/sprite caches after window resize so sizes match UI_SCALE."""
+    global _FONT_PIECE, _FONT_HP, _SPRITE_FRAMES, _ATTACK_HIT_EFFECT_FRAMES
+    _FONT_PIECE = None
+    _FONT_HP = None
+    _SPRITE_FRAMES = {}
+    _ATTACK_HIT_EFFECT_FRAMES = None
 
 
 def _load_sprite_frames(piece_id: str, animation: str = "Idle") -> list[pygame.Surface]:
@@ -281,7 +293,7 @@ def _load_sprite_frames(piece_id: str, animation: str = "Idle") -> list[pygame.S
     sheet = pygame.image.load(str(path)).convert_alpha()
     frame_w = int(config["frame_w"])
     frame_h = int(config["frame_h"])
-    target_h = int(config["target_h"])
+    target_h = max(20, int(int(config["target_h"]) * dcfg.UI_SCALE))
     frames: list[pygame.Surface] = []
 
     for x in range(0, sheet.get_width(), frame_w):
@@ -681,6 +693,7 @@ def _get_attack_hit_effect_frames() -> list[pygame.Surface]:
         frames: list[pygame.Surface] = []
         frame_w = 100
         frame_h = 100
+        target_h = max(24, int(_ATTACK_HIT_EFFECT_TARGET_H * dcfg.UI_SCALE))
         for x in range(0, sheet.get_width(), frame_w):
             frame = sheet.subsurface(pygame.Rect(x, 0, frame_w, frame_h)).copy()
             bounds = frame.get_bounding_rect(min_alpha=1)
@@ -689,10 +702,10 @@ def _get_attack_hit_effect_frames() -> list[pygame.Surface]:
             cropped = frame.subsurface(bounds).copy()
             target_w = max(
                 1,
-                int(cropped.get_width() * _ATTACK_HIT_EFFECT_TARGET_H / cropped.get_height()),
+                int(cropped.get_width() * target_h / cropped.get_height()),
             )
             frames.append(
-                pygame.transform.scale(cropped, (target_w, _ATTACK_HIT_EFFECT_TARGET_H))
+                pygame.transform.scale(cropped, (target_w, target_h))
             )
         _ATTACK_HIT_EFFECT_FRAMES = frames
     return _ATTACK_HIT_EFFECT_FRAMES

@@ -16,12 +16,10 @@ import pygame
 
 from xiangqi_arena.core.utils import Pos
 from xiangqi_arena.ui.board_renderer import node_to_pixel
+import xiangqi_arena.ui.display_config as dcfg
 from xiangqi_arena.ui.display_config import (
-    C_ATTACK_DOT, C_MOVE_DOT, PIECE_RADIUS,
+    C_ATTACK_DOT, C_MOVE_DOT,
 )
-
-_MOVE_RADIUS    = 10
-_ATTACK_RADIUS  = 12
 _ALPHA_MOVE     = 160
 _ALPHA_ATTACK   = 170
 _SELECT_ARROW_OUTLINE = (170, 115, 0)
@@ -102,12 +100,13 @@ def _draw_valid_moves(screen: pygame.Surface, nodes: list[Pos]) -> None:
         return
     for pos in nodes:
         px, py = node_to_pixel(*pos)
-        surf = pygame.Surface((_MOVE_RADIUS * 2, _MOVE_RADIUS * 2),
+        rad = dcfg.HIGHLIGHT_MOVE_R
+        surf = pygame.Surface((rad * 2, rad * 2),
                               pygame.SRCALPHA)
-        r, g, b = C_MOVE_DOT
-        pygame.draw.circle(surf, (r, g, b, _ALPHA_MOVE),
-                           (_MOVE_RADIUS, _MOVE_RADIUS), _MOVE_RADIUS)
-        screen.blit(surf, (px - _MOVE_RADIUS, py - _MOVE_RADIUS))
+        cr, cg, cb = C_MOVE_DOT
+        pygame.draw.circle(surf, (cr, cg, cb, _ALPHA_MOVE),
+                           (rad, rad), rad)
+        screen.blit(surf, (px - rad, py - rad))
 
 
 def _draw_valid_attacks(
@@ -124,12 +123,13 @@ def _draw_valid_attacks(
     for pos in nodes:
         px, py = node_to_pixel(*pos)
         if draw_dots:
-            surf = pygame.Surface((_ATTACK_RADIUS * 2, _ATTACK_RADIUS * 2),
+            rad = dcfg.HIGHLIGHT_ATTACK_R
+            surf = pygame.Surface((rad * 2, rad * 2),
                                   pygame.SRCALPHA)
-            r, g, b = C_ATTACK_DOT
-            pygame.draw.circle(surf, (r, g, b, _ALPHA_ATTACK),
-                               (_ATTACK_RADIUS, _ATTACK_RADIUS), _ATTACK_RADIUS)
-            screen.blit(surf, (px - _ATTACK_RADIUS, py - _ATTACK_RADIUS))
+            cr, cg, cb = C_ATTACK_DOT
+            pygame.draw.circle(surf, (cr, cg, cb, _ALPHA_ATTACK),
+                               (rad, rad), rad)
+            screen.blit(surf, (px - rad, py - rad))
         if show_attack_effect:
             _draw_attack_effect(screen, px, py)
         if show_arrows and pos in arrow_nodes:
@@ -142,7 +142,7 @@ def _draw_selected(screen: pygame.Surface, pos: Pos) -> None:
         math.sin(pygame.time.get_ticks() / _ARROW_FLOAT_MS * math.tau)
         * _ARROW_FLOAT_PX
     )
-    tip_y = py - PIECE_RADIUS - 15 + float_offset
+    tip_y = py - dcfg.PIECE_RADIUS - 15 + float_offset
     _draw_pixel_arrow(screen, px, tip_y, _SELECT_ARROW_OUTLINE, _SELECT_ARROW_FILL)
 
 
@@ -151,7 +151,7 @@ def _draw_attack_target_arrow(screen: pygame.Surface, px: int, py: int) -> None:
         math.sin(pygame.time.get_ticks() / _ARROW_FLOAT_MS * math.tau)
         * _ARROW_FLOAT_PX
     )
-    tip_y = py - PIECE_RADIUS - _ATTACK_ARROW_Y_OFFSET + float_offset
+    tip_y = py - dcfg.PIECE_RADIUS - _ATTACK_ARROW_Y_OFFSET + float_offset
     _draw_pixel_arrow(screen, px, tip_y, _ATTACK_ARROW_OUTLINE, _ATTACK_ARROW_FILL)
 
 

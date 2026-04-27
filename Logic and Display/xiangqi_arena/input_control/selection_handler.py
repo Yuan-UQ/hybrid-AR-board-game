@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from xiangqi_arena.core.constants import BOARD_COLS, BOARD_ROWS
 from xiangqi_arena.core.utils import Pos
 from xiangqi_arena.ui.board_renderer import node_to_pixel
-from xiangqi_arena.ui.display_config import NODE_SNAP
+import xiangqi_arena.ui.display_config as dcfg
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ def pixel_to_node(px: int, py: int) -> Pos | None:
     for bx in range(BOARD_COLS):
         for by in range(BOARD_ROWS):
             nx, ny = node_to_pixel(bx, by)
-            if abs(px - nx) <= NODE_SNAP and abs(py - ny) <= NODE_SNAP:
+            if abs(px - nx) <= dcfg.NODE_SNAP and abs(py - ny) <= dcfg.NODE_SNAP:
                 return (bx, by)
     return None
 
