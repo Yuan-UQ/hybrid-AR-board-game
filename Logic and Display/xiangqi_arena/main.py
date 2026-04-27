@@ -55,7 +55,7 @@ from xiangqi_arena.input_control.selection_handler import (
     SelectionState, pixel_to_node,
 )
 from xiangqi_arena.ui import display_config
-from xiangqi_arena.ui.board_renderer import draw_board, invalidate_board_image_cache
+from xiangqi_arena.ui.board_renderer import draw_board, draw_global_background, invalidate_board_image_cache
 from xiangqi_arena.ui.death_marker_renderer import draw_dead_pieces
 from xiangqi_arena.ui.piece_renderer import invalidate_layout_caches
 from xiangqi_arena.ui.event_renderer import (
@@ -653,7 +653,7 @@ def main() -> None:
         # ----------------------------------------------------------------
         # Render
         # ----------------------------------------------------------------
-        screen.fill((50, 40, 30))
+        draw_global_background(screen)
         draw_top_bar(screen)
         draw_board(screen)
         draw_dead_pieces(screen, state)

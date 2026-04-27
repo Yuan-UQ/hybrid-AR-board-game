@@ -116,13 +116,25 @@ BOARD_POINTS: dict[tuple[int, int], list[int]] = {
 
 _BOARD_IMAGE: pygame.Surface | None = None
 _BOARD_BACKDROP: pygame.Surface | None = None
+_GLOBAL_BG: pygame.Surface | None = None
+
+
+def _load_board_art() -> pygame.Surface:
+    image_path = (
+        Path(__file__).resolve().parents[2]
+        / "ArtResource"
+        / "Chess Board"
+        / "ChessBoardWithBackground.png"
+    )
+    return pygame.image.load(str(image_path)).convert()
 
 
 def invalidate_board_image_cache() -> None:
     """Call after window resize / layout change so the board image rescales."""
-    global _BOARD_IMAGE, _BOARD_BACKDROP
+    global _BOARD_IMAGE, _BOARD_BACKDROP, _GLOBAL_BG
     _BOARD_IMAGE = None
     _BOARD_BACKDROP = None
+    _GLOBAL_BG = None
 
 
 def node_to_pixel(x: int, y: int) -> tuple[int, int]:
@@ -137,33 +149,34 @@ def _draw_board_image(screen: pygame.Surface) -> None:
     global _BOARD_IMAGE, _BOARD_BACKDROP
 
     if _BOARD_IMAGE is None:
-        image_path = (
-            Path(__file__).resolve().parents[2]
-            / "ArtResource"
-            / "Chess Board"
-            / "ChessBoardWithBackground.png"
-        )
-        image = pygame.image.load(str(image_path)).convert()
-        # Backdrop: scale to the *available* board area to visually reduce letterboxing.
-        # This can stretch, but it's drawn subtly under the true aspect-ratio board.
-        _BOARD_BACKDROP = pygame.transform.smoothscale(
-            image,
-            (max(1, dcfg.BOARD_AVAIL_W), max(1, dcfg.BOARD_AVAIL_H)),
-        )
-        _BOARD_BACKDROP.set_alpha(90)
+        image = _load_board_art()
         _BOARD_IMAGE = pygame.transform.smoothscale(
             image,
             (dcfg.BOARD_IMAGE_W, dcfg.BOARD_IMAGE_H),
         )
 
-    if _BOARD_BACKDROP is not None:
-        screen.blit(_BOARD_BACKDROP, (dcfg.BOARD_AVAIL_LEFT, dcfg.BOARD_AVAIL_TOP))
-        # Slight dark overlay to keep focus on the main board.
-        shade = pygame.Surface((dcfg.BOARD_AVAIL_W, dcfg.BOARD_AVAIL_H), pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 55))
-        screen.blit(shade, (dcfg.BOARD_AVAIL_LEFT, dcfg.BOARD_AVAIL_TOP))
-
     screen.blit(_BOARD_IMAGE, (dcfg.BOARD_IMAGE_LEFT, dcfg.BOARD_IMAGE_TOP))
+
+
+def draw_global_background(screen: pygame.Surface) -> None:
+    """
+    Draw a full-screen stretched fantasy backdrop.
+
+    Uses the same board background art as a placeholder; later you can swap to
+    a dedicated scene background image.
+    """
+    global _GLOBAL_BG
+    if _GLOBAL_BG is None:
+        image = _load_board_art()
+        base = pygame.transform.smoothscale(image, (dcfg.WINDOW_W, dcfg.WINDOW_H))
+        # Lightweight blur: downscale then upscale.
+        # This avoids extra dependencies and is fast enough for a cached background.
+        blur_factor = max(0.08, min(0.22, 0.16 / max(0.6, dcfg.UI_SCALE)))
+        bw = max(1, int(dcfg.WINDOW_W * blur_factor))
+        bh = max(1, int(dcfg.WINDOW_H * blur_factor))
+        small = pygame.transform.smoothscale(base, (bw, bh))
+        _GLOBAL_BG = pygame.transform.smoothscale(small, (dcfg.WINDOW_W, dcfg.WINDOW_H))
+    screen.blit(_GLOBAL_BG, (0, 0))
 
 
 def draw_board(screen: pygame.Surface) -> None:
